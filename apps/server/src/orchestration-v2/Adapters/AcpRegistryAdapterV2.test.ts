@@ -855,9 +855,9 @@ describe("AcpRegistryAdapterV2", () => {
     }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
-  it.effect(
-    "hands live Claude child tools to the next run and keeps nested output in the child",
-    () =>
+  it.effect.each(["error", "end_turn"])(
+    "hands live Claude child tools to the next run after %s and keeps nested output in the child",
+    (stopReason) =>
       Effect.gen(function* () {
         const { update, childState, idle, prompt } = claudeFrames;
         const session = yield* openClaudeReplaySession([
@@ -873,7 +873,7 @@ describe("AcpRegistryAdapterV2", () => {
             status: "in_progress",
             rawInput: { command: "cat package.json" },
           }),
-          idle("error"),
+          idle(stopReason),
           ...prompt(2),
           childState(CLAUDE_ROOT_SESSION, "child-1", "running"),
           update("child-1", {
@@ -905,9 +905,9 @@ describe("AcpRegistryAdapterV2", () => {
           claudeFrames.closed,
         ]);
         yield* session.runtime.startTurn(session.turnInput(1));
-        const failed = yield* session.terminal;
-        assert.equal(failed.status, "failed");
-        assert.isTrue(failed.status === "failed" && failed.childTurnsContinue);
+        const settled = yield* session.terminal;
+        assert.equal(settled.status, stopReason === "error" ? "failed" : "completed");
+        if (settled.status === "failed") assert.isTrue(settled.childTurnsContinue);
         yield* session.runtime.startTurn(session.turnInput(2));
         const resumed = yield* session.throughMarker("resumed");
         const row = resumed.find((event) => event.type === "subagent.updated");
