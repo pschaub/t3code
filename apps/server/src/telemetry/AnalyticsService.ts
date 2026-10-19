@@ -284,9 +284,14 @@ export const make = Effect.gen(function* () {
     },
   );
 
-  yield* Effect.forever(Effect.sleep(FLUSH_INTERVAL_MS).pipe(Effect.flatMap(() => flushWhenDue)), {
-    disableYield: true,
-  }).pipe(Effect.forkScoped);
+  if (telemetryConfig.enabled && identifier) {
+    yield* Effect.forever(
+      Effect.sleep(FLUSH_INTERVAL_MS).pipe(Effect.flatMap(() => flushWhenDue)),
+      {
+        disableYield: true,
+      },
+    ).pipe(Effect.forkScoped);
+  }
 
   yield* Effect.addFinalizer(() => flush);
 

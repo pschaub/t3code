@@ -1,8 +1,10 @@
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it, vi } from "@effect/vitest";
+import * as Clock from "effect/Clock";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
@@ -140,7 +142,14 @@ it("retryDelayMs doubles from 2s and stays under the 5 minute cap", () => {
   assert.equal(AnalyticsService.retryDelayMs(30, 0.999_999), 300_000);
 });
 
-it.layer(NodeServices.layer)("AnalyticsService test", (it) => {
+const layerTestServices = Layer.effect(
+  HostProcess.HomeDirectory,
+  Effect.flatMap(FileSystem.FileSystem, (fs) =>
+    fs.makeTempDirectoryScoped({ prefix: "t3-telemetry-home-" }),
+  ),
+).pipe(Layer.provideMerge(NodeServices.layer));
+
+it.layer(layerTestServices)("AnalyticsService test", (it) => {
   it.effect("a batch that keeps failing is retried with the same uuids, then dropped", () =>
     Effect.gen(function* () {
       const failures = {
@@ -283,46 +292,82 @@ it.layer(NodeServices.layer)("AnalyticsService test", (it) => {
     }),
   );
 
-  it.effect("does not send batch requests when telemetry is disabled", () =>
-    Effect.gen(function* () {
-      const capturedPaths: Array<string> = [];
-      const layerServerConfig = ServerConfig.ServerConfig.layerTest(process.cwd(), {
-        prefix: "t3-telemetry-disabled-",
-      });
-      const layerTelemetry = AnalyticsService.layer.pipe(Layer.provideMerge(layerServerConfig));
-      const layerConfig = ConfigProvider.layer(
-        ConfigProvider.fromUnknown({
-          T3CODE_TELEMETRY_ENABLED: false,
-          T3CODE_POSTHOG_KEY: "phc_test_key",
-          T3CODE_POSTHOG_HOST: "http://localhost",
-        }),
-      );
-      const layerBatchServer = HttpServer.serve(
-        Effect.gen(function* () {
-          const request = yield* HttpServerRequest.HttpServerRequest;
-          capturedPaths.push(request.url);
-          return HttpServerResponse.jsonUnsafe({});
-        }),
-      );
-      const layerRuntime = layerTelemetry.pipe(
-        Layer.provide(layerConfig),
-        Layer.provide(
-          Layer.mergeAll(
-            Layer.succeed(HostProcess.Platform, "linux"),
-            Layer.succeed(HostProcess.Architecture, "arm64"),
+  it.effect.each([
+    { state: "disabled", enabled: false, identityAvailable: true },
+    { state: "identity is unavailable", enabled: true, identityAvailable: false },
+    { state: "enabled with an identity", enabled: true, identityAvailable: true },
+  ])(
+    "background delivery, manual flush and shutdown when $state",
+    ({ enabled, identityAvailable }) =>
+      Effect.gen(function* () {
+        const config = yield* ServerConfig.ServerConfig;
+        const fs = yield* FileSystem.FileSystem;
+        if (!identityAvailable) {
+          yield* fs.makeDirectory(config.anonymousIdPath);
+        }
+        assert.equal((yield* getTelemetryIdentifier) !== null, identityAvailable);
+
+        const capturedPaths: Array<string> = [];
+        const layerRuntime = AnalyticsService.layer.pipe(
+          Layer.provide(
+            ConfigProvider.layer(
+              ConfigProvider.fromUnknown({
+                T3CODE_TELEMETRY_ENABLED: enabled,
+                T3CODE_POSTHOG_KEY: "phc_test_key",
+                T3CODE_POSTHOG_HOST: "http://localhost",
+              }),
+            ),
           ),
+          Layer.provide(
+            Layer.succeed(
+              HttpClient.HttpClient,
+              HttpClient.make((request) => {
+                capturedPaths.push(request.url);
+                return respondWithStatus(204)(request);
+              }),
+            ),
+          ),
+        );
+        const clock = yield* Clock.Clock;
+        let sleepRequests = 0;
+        const canSend = enabled && identityAvailable;
+        const idleSleepRequests = yield* Effect.gen(function* () {
+          const analytics = yield* AnalyticsService.AnalyticsService;
+          yield* TestClock.adjust(0);
+          const idleSleepRequests = sleepRequests;
+
+          yield* analytics.record("test.background", { index: 1 });
+          yield* TestClock.adjust("10 seconds");
+          assert.equal(capturedPaths.length, canSend ? 1 : 0);
+
+          yield* analytics.record("test.manual", { index: 2 });
+          yield* analytics.flush;
+          assert.equal(capturedPaths.length, canSend ? 2 : 0);
+
+          yield* analytics.record("test.shutdown", { index: 3 });
+          return idleSleepRequests;
+        }).pipe(
+          Effect.provide(layerRuntime),
+          Effect.provideService(Clock.Clock, {
+            ...clock,
+            sleep: (duration) =>
+              Effect.suspend(() => {
+                sleepRequests += 1;
+                return clock.sleep(duration);
+              }),
+          }),
+        );
+
+        assert.equal(capturedPaths.length, canSend ? 3 : 0);
+        assert.equal(
+          idleSleepRequests > 0,
+          canSend,
+          "only deliverable telemetry schedules idle sleeps",
+        );
+      }).pipe(
+        Effect.provide(
+          ServerConfig.ServerConfig.layerTest(process.cwd(), { prefix: "t3-telemetry-idle-" }),
         ),
-        Layer.provideMerge(NodeHttpServer.layerTest),
-      );
-
-      yield* Effect.gen(function* () {
-        yield* Layer.launch(layerBatchServer).pipe(Effect.forkScoped);
-        const analytics = yield* AnalyticsService.AnalyticsService;
-        yield* analytics.record("test.disabled", { index: 1 });
-        yield* analytics.flush;
-      }).pipe(Effect.provide(layerRuntime));
-
-      assert.deepEqual(capturedPaths, []);
-    }),
+      ),
   );
 });
