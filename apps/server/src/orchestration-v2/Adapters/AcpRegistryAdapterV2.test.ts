@@ -10,6 +10,7 @@ import {
   ProviderSessionId,
   ThreadId,
 } from "@t3tools/contracts";
+import { pendingBackgroundTurnItems } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import { resolveSelfInvocation } from "@t3tools/shared/nodeRuntime";
 import * as Exit from "effect/Exit";
 import * as DateTime from "effect/DateTime";
@@ -688,7 +689,7 @@ describe("AcpRegistryAdapterV2", () => {
 
   it.effect("settles Claude's accepted foreground reply while retaining child output", () =>
     Effect.gen(function* () {
-      const gate = makeProviderReplayGate(["accepted", "child-output"]);
+      const gate = makeProviderReplayGate(["accepted", "child-output", "wake"]);
       const { update, idle, prompt } = claudeFrames;
       const session = yield* openClaudeReplaySession(
         [
@@ -698,6 +699,15 @@ describe("AcpRegistryAdapterV2", () => {
           claudeMarker("before acceptance"),
           { ...prompt(1)[1], label: "accepted" },
           ...prompt(1).slice(2),
+          update(CLAUDE_ROOT_SESSION, {
+            sessionUpdate: "tool_call_update",
+            toolCallId: "agent-1",
+            name: "Agent",
+            title: "Review",
+            kind: "think",
+            status: "pending",
+            rawInput: { description: "Review" },
+          }),
           ...claudeChild,
           update(CLAUDE_ROOT_SESSION, {
             sessionUpdate: "agent_message_chunk",
@@ -713,7 +723,18 @@ describe("AcpRegistryAdapterV2", () => {
             }),
             label: "child-output",
           },
+          claudeFrames.childState(CLAUDE_ROOT_SESSION, "child-1", "idle"),
           claudeMarker("child output"),
+          {
+            ...update(CLAUDE_ROOT_SESSION, {
+              sessionUpdate: "user_message",
+              messageId: "wake-user",
+              content: [{ type: "text", text: "Continue the review." }],
+            }),
+            label: "wake",
+          },
+          idle("end_turn"),
+          claudeMarker("continuation idle"),
           claudeFrames.closeRequest,
           claudeFrames.closed,
         ],
@@ -723,7 +744,11 @@ describe("AcpRegistryAdapterV2", () => {
       const beforeAcceptance = yield* session.throughMarker("before acceptance");
       assert.isFalse(beforeAcceptance.some((event) => event.type === "turn.terminal"));
       gate.release("accepted");
-      assert.equal((yield* session.terminal).status, "completed");
+      const foreground = yield* session.until((event) => event.type === "turn.terminal");
+      const foregroundTerminal = foreground.at(-1)!;
+      if (foregroundTerminal.type !== "turn.terminal")
+        throw new Error("Missing foreground terminal");
+      assert.equal(foregroundTerminal.status, "completed");
       assert.isTrue(yield* session.runtime.hasPendingBackgroundWork!);
       gate.release("child-output");
       const childOutput = yield* session.throughMarker("child output");
@@ -736,6 +761,51 @@ describe("AcpRegistryAdapterV2", () => {
         assert.notEqual(message.message.threadId, session.turnInput(1).threadId);
       }
       assert.isFalse(childOutput.some((event) => event.type === "turn.terminal"));
+      assert.isTrue(
+        childOutput.some(
+          (event) => event.type === "subagent.updated" && event.subagent.status === "completed",
+        ),
+      );
+      const rootItems = new Map(
+        [...foreground, ...childOutput].flatMap((event) =>
+          event.type === "turn_item.updated" &&
+          event.turnItem.threadId === session.turnInput(1).threadId
+            ? [[event.turnItem.id, event.turnItem] as const]
+            : [],
+        ),
+      );
+      const generic = [...rootItems.values()].filter((item) => item.type === "dynamic_tool");
+      assert.lengthOf(generic, 1, "the early partial tool was projected");
+      assert.isTrue(
+        generic.every((item) => item.status === "completed"),
+        "promotion settles the provisional generic tool",
+      );
+      assert.isFalse(
+        [...rootItems.values()].some((item) => item.type === "user_message"),
+        "the submitted root prompt is already owned by the app",
+      );
+      assert.deepEqual(pendingBackgroundTurnItems({ turnItems: [...rootItems.values()] }), []);
+      assert.isFalse(yield* session.runtime.hasPendingBackgroundWork!);
+      gate.release("wake");
+      yield* Deferred.await(session.offered);
+      yield* session.throughMarker("continuation idle");
+      const offer = session.offers[0]!;
+      yield* offer.dispatchIfCurrent!(Effect.void);
+      yield* session.runtime.startTurn(session.turnInput(2, { continuation: true }));
+      const continuation = yield* session.until((event) => event.type === "turn.terminal");
+      const terminal = continuation.at(-1)!;
+      if (terminal.type !== "turn.terminal") throw new Error("Missing continuation terminal");
+      assert.equal(
+        terminal.status,
+        "completed",
+        "buffered acceptance preserves the latest live idle",
+      );
+      assert.isFalse(
+        continuation.some(
+          (event) => event.type === "turn_item.updated" && event.turnItem.type === "user_message",
+        ),
+        "autonomous root echoes only signal acceptance",
+      );
     }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
@@ -831,6 +901,11 @@ describe("AcpRegistryAdapterV2", () => {
         (event) =>
           event.type === "runtime_request.updated" && event.runtimeRequest.status === "pending",
       );
+      assert.isFalse(
+        seen.some(
+          (event) => event.type === "turn_item.updated" && event.turnItem.type === "user_message",
+        ),
+      );
       const request = seen.at(-1)!;
       if (request.type !== "runtime_request.updated") throw new Error("Missing request");
       assert.isTrue(
@@ -914,6 +989,17 @@ describe("AcpRegistryAdapterV2", () => {
         assert.isDefined(row);
         if (row?.type !== "subagent.updated") throw new Error("Missing resumed child");
         assert.equal(row.subagent.runId, session.turnInput(2).runId);
+        assert.lengthOf(
+          resumed.filter(
+            (event) =>
+              event.type === "message.updated" &&
+              event.message.threadId === row.subagent.childThreadId &&
+              event.message.role === "user" &&
+              event.message.text === "Continue the review.",
+          ),
+          1,
+          "child resume prompts remain visible once",
+        );
         const openTools = resumed.filter(
           (event) =>
             event.type === "turn_item.updated" &&
@@ -956,6 +1042,58 @@ describe("AcpRegistryAdapterV2", () => {
       assert.equal(terminal.status, "failed");
       assert.equal(terminal.failure?.class, "transport_error");
       assert.isFalse(yield* session.runtime.hasPendingBackgroundWork!);
+      const settled = yield* openClaudeReplaySession([
+        ...claudeFrames.open,
+        ...claudeFrames.prompt(1),
+        ...claudeChild,
+        claudeFrames.childState("child-1", "grandchild", "running"),
+        claudeFrames.update("grandchild", {
+          sessionUpdate: "tool_call_update",
+          toolCallId: "nested-tool",
+          name: "Bash",
+          kind: "execute",
+          status: "in_progress",
+          rawInput: { command: "cat package.json" },
+        }),
+        claudeFrames.childState(CLAUDE_ROOT_SESSION, "child-1", "idle"),
+        claudeFrames.idle("end_turn"),
+      ]);
+      yield* settled.runtime.startTurn(settled.turnInput(1));
+      const foreground = yield* settled.until((event) => event.type === "turn.terminal");
+      const completed = foreground.at(-1)!;
+      if (completed.type !== "turn.terminal") throw new Error("Missing settled root terminal");
+      assert.equal(completed.status, "completed");
+      assert.isTrue(yield* settled.runtime.hasPendingBackgroundWork!);
+      yield* settled.terminate();
+      assert.isFalse(
+        yield* settled.runtime.hasPendingBackgroundWork!,
+        "exit releases visible owners held open by nested work",
+      );
+      const exited = yield* settled.until(
+        (event) =>
+          event.type === "turn_item.updated" &&
+          event.turnItem.type === "subagent" &&
+          event.turnItem.status === "failed",
+      );
+      assert.isTrue(
+        exited.some(
+          (event) => event.type === "subagent.updated" && event.subagent.status === "failed",
+        ),
+      );
+      const items = new Map(
+        [...foreground, ...exited].flatMap((event) =>
+          event.type === "turn_item.updated" ? [[event.turnItem.id, event.turnItem] as const] : [],
+        ),
+      );
+      assert.deepEqual(pendingBackgroundTurnItems({ turnItems: [...items.values()] }), []);
+      assert.isTrue(
+        exited.some(
+          (event) =>
+            event.type === "turn_item.updated" &&
+            event.turnItem.type === "dynamic_tool" &&
+            event.turnItem.status === "interrupted",
+        ),
+      );
     }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
