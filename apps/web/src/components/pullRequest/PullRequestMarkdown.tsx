@@ -15,6 +15,7 @@ import { remarkPullRequestAutolinks, splitPullRequestBody } from "./pullRequestM
 
 export const PullRequestMarkdownContext = createContext<{
   repositoryUrl: string | null;
+  repository?: string | undefined;
   threadRef: ScopedThreadRef | null;
 } | null>(null);
 
@@ -23,13 +24,20 @@ function PullRequestGitHubVideo({
   cwd,
   url,
   fetchUrl,
+  repository,
 }: {
   environmentId: EnvironmentId;
   cwd: string;
   url: string;
   fetchUrl: string;
+  repository?: string | undefined;
 }) {
-  const resource: AssetResource = { _tag: "github-media", cwd, url: fetchUrl };
+  const resource: AssetResource = {
+    _tag: "github-media",
+    cwd,
+    url: fetchUrl,
+    ...(repository === undefined ? {} : { repository }),
+  };
   const assetUrl = useAssetUrlState(environmentId, resource);
   const refreshAssetUrl = useAssetUrlRefresh(environmentId, resource);
   const src =
@@ -86,6 +94,7 @@ export function PullRequestMarkdown({
               environmentId={environmentId}
               extraRemarkPlugins={extraRemarkPlugins}
               githubMedia
+              githubMediaRepository={context?.repository}
             />
           );
         }
@@ -98,6 +107,7 @@ export function PullRequestMarkdown({
               cwd={cwd}
               url={segment.url}
               fetchUrl={githubMediaUrl}
+              repository={context?.repository}
             />
           );
         }

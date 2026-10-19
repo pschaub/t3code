@@ -125,6 +125,7 @@ function Discussion({ params }: { params: PullRequestParams & { readonly discuss
   const resolveLabel = thread?.isResolved ? "Unresolve" : "Resolve";
   return (
     <PullRequestMarkdownRepository
+      detail={detail.data}
       params={params}
       value={detail.data?.provider === "github" ? detail.data.url : null}
     >

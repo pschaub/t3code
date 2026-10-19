@@ -378,6 +378,7 @@ export function PullRequestRouteScreen({ route }: StaticScreenProps<PullRequestP
   };
   return (
     <PullRequestMarkdownRepository
+      detail={pr}
       params={params}
       value={pr?.provider === "github" ? pr.url : null}
     >

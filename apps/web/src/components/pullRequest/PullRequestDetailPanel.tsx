@@ -550,8 +550,13 @@ function pullRequestMarkdownContext(
   hostClient: ReturnType<typeof sourceControlClients.get>,
   repositoryUrl: string | null,
   threadRef: ScopedThreadRef | null,
+  repository: string | undefined,
 ) {
   return {
+    repository:
+      repositoryUrl === null || repository === undefined
+        ? undefined
+        : `${new URL(repositoryUrl).host}/${repository}`,
     repositoryUrl:
       repositoryUrl === null ? null : hostClient.referenceAutolinkRepositoryUrl(repositoryUrl),
     threadRef,
@@ -775,7 +780,12 @@ export function PullRequestDetailPanel({
   const repositoryUrl = detail === null ? null : changeRequestRepositoryUrl(detail.url);
   const hostClient = sourceControlClients.get(detail?.provider);
   const openOnHostText = openOnHostLabel(hostClient);
-  const markdownContext = pullRequestMarkdownContext(hostClient, repositoryUrl, threadRef);
+  const markdownContext = pullRequestMarkdownContext(
+    hostClient,
+    repositoryUrl,
+    threadRef,
+    detail?.repository,
+  );
   const authorProfileUrl =
     detail?.author && repositoryUrl !== null
       ? hostClient.authorProfileUrl(detail.author.login, repositoryUrl)

@@ -1,5 +1,6 @@
 import { splitPullRequestBody } from "@t3tools/client-runtime/pull-request-markdown";
 import type { ReactNode } from "react";
+import type { PullRequestDetail } from "@t3tools/contracts";
 import { View } from "react-native";
 import { useProject } from "../../state/entities";
 import { pullRequestTarget, type PullRequestParams } from "./usePullRequestDiff";
@@ -31,6 +32,10 @@ const RepositoryContext = createContext<string | null>(null);
 export function PullRequestMarkdownRepository(props: {
   readonly value: string | null;
   readonly params: PullRequestParams;
+  readonly detail?:
+    | Pick<PullRequestDetail, "repository" | "workspaceRoot" | "url">
+    | null
+    | undefined;
   readonly children: ReactNode;
 }) {
   const target = pullRequestTarget(props.params);
@@ -38,10 +43,14 @@ export function PullRequestMarkdownRepository(props: {
     environmentId: target.environmentId,
     projectId: target.input.projectId,
   });
-  const cwd = project?.workspaceRoot;
+  const cwd = props.detail?.workspaceRoot ?? project?.workspaceRoot;
+  const repository = props.detail?.repository ?? props.params.repository;
+  const repositoryUrl = props.detail?.url ?? props.value;
+  const host = repositoryUrl === null ? props.params.host : new URL(repositoryUrl).host;
+  const selector = host ? `${host}/${repository}` : repository;
   const media = useMemo(
-    () => (cwd ? { environmentId: target.environmentId, cwd } : null),
-    [target.environmentId, cwd],
+    () => (cwd ? { environmentId: target.environmentId, cwd, repository: selector } : null),
+    [target.environmentId, cwd, selector],
   );
   return (
     <RepositoryContext value={props.value}>
