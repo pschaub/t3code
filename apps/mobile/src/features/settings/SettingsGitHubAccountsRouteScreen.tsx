@@ -9,7 +9,7 @@ import {
   type GitHubHostGroup,
 } from "@t3tools/client-runtime/github-accounts";
 import { readGitHubSettings } from "@t3tools/client-runtime/source-control-clients";
-import { AuthSettingsWriteScope, type ProjectId } from "@t3tools/contracts";
+import { type ProjectId } from "@t3tools/contracts";
 import { useState } from "react";
 import { View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -19,7 +19,6 @@ import { ScreenScrollView } from "../../components/ui/ScreenScrollView";
 import { environmentProjects } from "../../state/projects";
 import { useEnvironmentQuery } from "../../state/query";
 import { serverEnvironment } from "../../state/server";
-import { useEnvironmentsWithScope } from "../../state/session";
 import { sourceControlEnvironment } from "../../state/sourceControl";
 import { useAtomCommand } from "../../state/use-atom-command";
 import {
@@ -67,9 +66,7 @@ function useGitHubAccountChoices(environment: SettingsTarget) {
     sourceControlEnvironment.discovery({ environmentId, input: {} }),
   );
   const projects = useAtomValue(environmentProjects.environmentProjectsAtom(environmentId));
-  const writable = useEnvironmentsWithScope([environment], AuthSettingsWriteScope).has(
-    environmentId,
-  );
+  const writable = useAtomValue(serverEnvironment.updateSettings.permissionAtom(environmentId));
   const updateSettings = useAtomCommand(serverEnvironment.updateSettings, {
     label: "save GitHub account settings",
     reportFailure: true,
@@ -180,9 +177,7 @@ function HostAccounts(props: {
     choice?.account !== undefined && group.selectable.includes(choice.account)
       ? choice.account
       : null;
-  // What an owner without a rule reads as: the host's pinned login, else gh's active one.
   const hostAccount = pinned ?? group.activeAccount;
-  // Repositories a project gave a rule of its own, which wins over its owner's.
   const repositories = Object.keys(choice?.repositories ?? {}).sort((left, right) =>
     left.localeCompare(right),
   );

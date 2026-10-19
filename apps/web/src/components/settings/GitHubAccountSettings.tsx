@@ -164,6 +164,7 @@ export function GitHubAccountSettings({
   const hosts = github.hosts;
   const projects = useAtomValue(environmentProjects.environmentProjectsAtom(environmentId));
   const identities = projects.map((project) => project.repositoryIdentity);
+  const writable = useAtomValue(serverEnvironment.updateSettings.permissionAtom(environmentId));
   const updateSettings = useAtomCommand(serverEnvironment.updateSettings, {
     label: "save GitHub account settings",
   });
@@ -226,7 +227,6 @@ export function GitHubAccountSettings({
             revealed={revealed}
           />
         );
-        // What an owner without a rule reads as: the host's pinned login, else gh's active one.
         const hostAccount = pinned === DEFAULT_ACCOUNT ? group.activeAccount : pinned;
         const multiple = group.selectable.length > 1;
         const owners = multiple
@@ -249,7 +249,7 @@ export function GitHubAccountSettings({
               </div>
               <Switch
                 checked={enabled}
-                disabled={saving}
+                disabled={saving || !writable}
                 aria-label={`Use GitHub on ${group.host}`}
                 onCheckedChange={(checked) => void save(group.host, { enabled: checked })}
               />
@@ -262,7 +262,7 @@ export function GitHubAccountSettings({
                   accounts={group.selectable}
                   defaultLabel={activeLabel}
                   revealed={revealed}
-                  disabled={saving}
+                  disabled={saving || !writable}
                   ariaLabel={`GitHub account for ${group.host}`}
                   onChange={(account) => void save(group.host, { account })}
                 />
@@ -276,7 +276,7 @@ export function GitHubAccountSettings({
                 <Button
                   size="xs"
                   variant="outline"
-                  disabled={saving}
+                  disabled={saving || !writable}
                   onClick={() => void save(group.host, { account: null })}
                 >
                   Use active login
@@ -305,7 +305,7 @@ export function GitHubAccountSettings({
                       <DefaultLabel prefix="Default" account={hostAccount} revealed={revealed} />
                     }
                     revealed={revealed}
-                    disabled={saving}
+                    disabled={saving || !writable}
                     ariaLabel={`GitHub account for ${owner} on ${group.host}`}
                     staleWarning={`This login is no longer signed in, so ${owner} uses the default account.`}
                     onChange={(account) =>
@@ -334,7 +334,7 @@ export function GitHubAccountSettings({
                       />
                     }
                     revealed={revealed}
-                    disabled={saving}
+                    disabled={saving || !writable}
                     ariaLabel={`GitHub account for ${repository} on ${group.host}`}
                     staleWarning={`This login is no longer signed in, so ${repository} reads as its owner's account.`}
                     onChange={(account) =>
@@ -373,6 +373,7 @@ export function ProjectGitHubAccountRow({
   );
   const projects = useAtomValue(environmentProjects.environmentProjectsAtom(environmentId));
   const hosts = useEnvironmentSettings(environmentId, readGitHubSettings).hosts;
+  const writable = useAtomValue(serverEnvironment.updateSettings.permissionAtom(environmentId));
   const updateSettings = useAtomCommand(serverEnvironment.updateSettings, {
     label: "save GitHub account settings",
   });
@@ -449,7 +450,12 @@ export function ProjectGitHubAccountRow({
             {revealed ? <EyeOffIcon /> : <EyeIcon />}
           </Button>
           {stale ? (
-            <Button size="xs" variant="outline" disabled={saving} onClick={() => void save(null)}>
+            <Button
+              size="xs"
+              variant="outline"
+              disabled={saving || !writable}
+              onClick={() => void save(null)}
+            >
               Clear override
             </Button>
           ) : null}
@@ -460,7 +466,7 @@ export function ProjectGitHubAccountRow({
               <DefaultLabel prefix="Owner's account" account={ownerAccount} revealed={revealed} />
             }
             revealed={revealed}
-            disabled={saving}
+            disabled={saving || !writable}
             ariaLabel={`GitHub account for ${repository.repository}`}
             onChange={(account) => void save(account)}
           />
