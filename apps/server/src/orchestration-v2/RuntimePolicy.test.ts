@@ -161,29 +161,41 @@ it.layer(layerTest)("RuntimePolicyV2", (it) => {
 
 const tokenReads: Array<string | null | undefined> = [];
 const repositoryReads: Array<string> = [];
-const identityFor = (owner: string, host = "github.com") => ({
-  canonicalKey: `${host}/${owner}/web`,
-  locator: {
-    source: "git-remote" as const,
-    remoteName: "origin",
-    remoteUrl: `git@${host}:${owner}/web.git`,
-  },
-  owner,
-  name: "web",
-});
 
 const layerWithAccounts = layerTest.pipe(
   Layer.provide(
     Layer.mergeAll(
-      Layer.mock(RepositoryIdentityResolver.RepositoryIdentityResolver)({
-        resolve: (cwd) =>
-          Effect.sync(() => {
-            repositoryReads.push(cwd);
-            return cwd === "/enterprise-worktree"
-              ? identityFor("acme", "github.acme-corp.example")
-              : identityFor(cwd === "/project-worktree" ? "acme" : "someone");
+      Layer.effect(
+        RepositoryIdentityResolver.RepositoryIdentityResolver,
+        RepositoryIdentityResolver.make(),
+      ).pipe(
+        Layer.provide(
+          Layer.mock(ProcessRunner.ProcessRunner)({
+            run: ({ args }) =>
+              Effect.sync(() => {
+                const cwd = args[1] ?? "";
+                if (args.includes("rev-parse")) repositoryReads.push(cwd);
+                const host =
+                  cwd === "/enterprise-worktree" ? "github.acme-corp.example" : "github.com";
+                const owner = cwd === "/project-root" ? "someone" : "acme";
+                return {
+                  stdout: args.includes("rev-parse")
+                    ? `${cwd}\n`
+                    : args.includes("remote")
+                      ? `origin\thttps://${host}/${owner}/web.git (fetch)\n`
+                      : "",
+                  stderr: "",
+                  code: ChildProcessSpawner.ExitCode(0),
+                  timedOut: false,
+                  stdoutTruncated: false,
+                  stderrTruncated: false,
+                  stdoutInvalidUtf8: false,
+                  stderrInvalidUtf8: false,
+                };
+              }),
           }),
-      }),
+        ),
+      ),
       Layer.mock(GitHubCredentials.GitHubCredentials)({
         accountFor: (_host, repository) =>
           Effect.succeed(repository === "acme/web" ? "work" : undefined),
@@ -245,7 +257,7 @@ it.layer(layerWithAccounts)("RuntimePolicyV2 with GitHub accounts", (it) => {
       });
       assert.isUndefined(enterprise.environment);
       assert.deepEqual(tokenReads, ["acme/web"]);
-    }),
+    }).pipe(Effect.provideService(HostProcess.Environment, {})),
   );
 });
 
