@@ -1,4 +1,8 @@
-import { extractClaudeSubagentUpdate, extractClaudeSubagentSessionEvent } from "./claudeAcp.ts";
+import {
+  extractClaudeSubagentUpdate,
+  extractClaudeSubagentSessionEvent,
+  isClaudeProvisionalSubagentTool,
+} from "./claudeAcp.ts";
 import {
   normalizeDevinSessionUpdate,
   normalizeDevinToolCall,
@@ -214,6 +218,7 @@ export const makeAcpRegistryAdapterV2 = Effect.fn("makeAcpRegistryAdapterV2")(fu
       ? {
           followAgentWorkState: true,
           extractSubagentUpdate: extractClaudeSubagentUpdate,
+          isProvisionalSubagentTool: isClaudeProvisionalSubagentTool,
           extractSubagentSessionEvent: extractClaudeSubagentSessionEvent,
         }
       : {}),

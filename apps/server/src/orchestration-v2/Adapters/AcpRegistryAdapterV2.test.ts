@@ -397,6 +397,21 @@ const claudeChild = [
   }),
 ];
 
+const claudeUnrelatedChildren = [
+  claudeFrames.childState("unknown-parent", "unrelated-child", "running"),
+  claudeFrames.update("unrelated-child", {
+    sessionUpdate: "session_message",
+    messageId: "agent-1",
+    senderSessionId: "unknown-parent",
+    content: [{ type: "text", text: "Unrelated delegation" }],
+  }),
+  claudeFrames.update("unlinked-child", {
+    sessionUpdate: "agent_message_chunk",
+    messageId: "unlinked-reply",
+    content: { type: "text", text: "Unlinked output" },
+  }),
+];
+
 describe("AcpRegistryAdapterV2", () => {
   it("preserves and sanitizes structured ACP errors without exposing arbitrary defects", () => {
     const limit = new EffectAcpErrors.AcpRequestError({
@@ -708,7 +723,26 @@ describe("AcpRegistryAdapterV2", () => {
             status: "pending",
             rawInput: { description: "Review" },
           }),
+          update(CLAUDE_ROOT_SESSION, {
+            sessionUpdate: "tool_call_update",
+            toolCallId: "malformed-agent",
+            name: "Agent",
+            title: "Incomplete agent",
+            kind: "think",
+            status: "pending",
+            rawInput: { description: "Never receives a prompt" },
+          }),
+          update(CLAUDE_ROOT_SESSION, {
+            sessionUpdate: "tool_call_update",
+            toolCallId: "failed-task",
+            name: "Task",
+            title: "Malformed task",
+            kind: "think",
+            status: "failed",
+            rawInput: { description: "Missing prompt" },
+          }),
           ...claudeChild,
+          ...claudeUnrelatedChildren,
           update(CLAUDE_ROOT_SESSION, {
             sessionUpdate: "agent_message_chunk",
             messageId: "reply",
@@ -775,11 +809,16 @@ describe("AcpRegistryAdapterV2", () => {
         ),
       );
       const generic = [...rootItems.values()].filter((item) => item.type === "dynamic_tool");
-      assert.lengthOf(generic, 1, "the early partial tool was projected");
-      assert.isTrue(
-        generic.every((item) => item.status === "completed"),
-        "promotion settles the provisional generic tool",
+      assert.isFalse(
+        generic.some((item) => item.nativeItemRef?.nativeId === "agent-1"),
+        "native subagents never project a duplicate generic tool",
       );
+      const malformed = generic.find((item) => item.nativeItemRef?.nativeId === "malformed-agent");
+      assert.isDefined(malformed, "unclassified tools still project on foreground completion");
+      assert.equal(malformed?.status, "completed");
+      const failed = generic.find((item) => item.nativeItemRef?.nativeId === "failed-task");
+      assert.isDefined(failed, "unclassified terminal tools retain ordinary failures");
+      assert.equal(failed?.status, "failed");
       assert.isFalse(
         [...rootItems.values()].some((item) => item.type === "user_message"),
         "the submitted root prompt is already owned by the app",
@@ -875,6 +914,8 @@ describe("AcpRegistryAdapterV2", () => {
                   : { action: "accept", content: { file: "a.ts" } },
             },
           },
+          claudeFrames.childState(CLAUDE_ROOT_SESSION, "child-1", "idle"),
+          ...claudeUnrelatedChildren,
           claudeFrames.update(CLAUDE_ROOT_SESSION, {
             sessionUpdate: "state_update",
             state: "idle",
@@ -924,8 +965,10 @@ describe("AcpRegistryAdapterV2", () => {
       });
       const terminal = yield* session.terminal;
       assert.equal(terminal.status, testCase.status);
-      if (testCase.status === "failed") {
+      if (terminal.status === "failed") {
         assert.include(terminal.failure?.message ?? "", "529 overloaded");
+        assert.isUndefined(terminal.childTurnsContinue);
+        assert.isFalse(yield* session.runtime.hasPendingBackgroundWork!);
       }
     }).pipe(Effect.provide(layerTest), Effect.scoped),
   );

@@ -21,6 +21,15 @@ const decodeAsyncResponse = Schema.decodeUnknownOption(
   }),
 );
 
+export function isClaudeProvisionalSubagentTool(tool: AcpToolCallState): boolean {
+  return (
+    (tool.data.name === "Agent" || tool.data.name === "Task") &&
+    tool.status !== "failed" &&
+    tool.status !== "completed" &&
+    Option.isNone(decodeAgentInput(tool.data.rawInput))
+  );
+}
+
 export function extractClaudeSubagentUpdate(
   tool: AcpToolCallState,
 ): AcpAdapterV2SubagentUpdate | undefined {
