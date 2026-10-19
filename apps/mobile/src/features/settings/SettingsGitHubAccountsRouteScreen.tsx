@@ -76,7 +76,8 @@ function useGitHubAccountChoices(environment: SettingsTarget) {
   const github = discovery.data?.sourceControlProviders.find(
     (provider) => provider.kind === "github",
   );
-  const groups = groupGitHubAccounts(github?.auth.accounts ?? [], hosts);
+  const groups =
+    discovery.data === null ? [] : groupGitHubAccounts(github?.auth.accounts ?? [], hosts);
 
   const save = async (host: string, change: Parameters<typeof nextGitHubHosts>[2]) => {
     if (saving) return;

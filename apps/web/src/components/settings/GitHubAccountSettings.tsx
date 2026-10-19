@@ -395,7 +395,7 @@ export function ProjectGitHubAccountRow({
       : groupGitHubAccounts(github?.auth.accounts ?? [], hosts).find(
           (candidate) => candidate.host === repository.host,
         );
-  if (repository === null || group === undefined) return null;
+  if (discovery.data === null || repository === null || group === undefined) return null;
   if (
     group.selectable.length < 2 &&
     hosts[repository.host]?.repositories?.[repository.repository] === undefined
