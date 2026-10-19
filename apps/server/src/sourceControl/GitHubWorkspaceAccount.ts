@@ -1,4 +1,5 @@
 import * as Effect from "effect/Effect";
+import type * as Redacted from "effect/Redacted";
 
 import * as GitHubCredentials from "@t3tools/source-control-github/server/GitHubCredentials";
 
@@ -24,3 +25,21 @@ export const workspaceGitHubCredential = Effect.fn("GitHubWorkspaceAccount.crede
     .get(workspace.host, workspace.repository)
     .pipe(Effect.orElseSucceed(() => null));
 });
+
+export const agentGitHubEnvironment = Effect.fn("GitHubWorkspaceAccount.agentEnvironment")(
+  function* (cwd: string) {
+    const none: Readonly<Record<string, Redacted.Redacted<string>>> = {};
+    const workspace = yield* workspaceGitHubRepository(cwd);
+    // gh sends enterprise tokens to any non-public host a command names.
+    // Keep enterprise credentials in gh's host-scoped store instead.
+    if (workspace === null || !GitHubCredentials.isGitHubDotCom(workspace.host)) return none;
+    const credentials = yield* GitHubCredentials.GitHubCredentials;
+    if ((yield* credentials.accountFor(workspace.host, workspace.repository)) === undefined) {
+      return none;
+    }
+    const credential = yield* credentials
+      .get(workspace.host, workspace.repository)
+      .pipe(Effect.orElseSucceed(() => null));
+    return credential?.account === undefined ? none : { GH_TOKEN: credential.token };
+  },
+);

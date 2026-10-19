@@ -12,9 +12,13 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Redacted from "effect/Redacted";
 import * as Stream from "effect/Stream";
 
 import type { ProviderInstance } from "@t3tools/provider-core/server/driver";
+import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import * as GitHubCredentials from "@t3tools/source-control-github/server/GitHubCredentials";
+import * as RepositoryIdentityResolver from "../project/RepositoryIdentityResolver.ts";
 import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
 import * as ProjectStore from "./ProjectStore.ts";
 import * as RuntimePolicy from "./RuntimePolicy.ts";
@@ -148,6 +152,81 @@ it.layer(layerTest)("RuntimePolicyV2", (it) => {
       assert.equal(yield* modeFor(grokInstanceId, "auto"), "auto");
       assert.equal(yield* modeFor(grokInstanceId, "full-access"), "full-access");
       assert.equal(yield* modeFor(providerInstanceId, "auto-accept-edits"), "auto-accept-edits");
+    }),
+  );
+});
+
+const tokenReads: Array<string | null | undefined> = [];
+const identityFor = (owner: string, host = "github.com") => ({
+  canonicalKey: `${host}/${owner}/web`,
+  locator: {
+    source: "git-remote" as const,
+    remoteName: "origin",
+    remoteUrl: `git@${host}:${owner}/web.git`,
+  },
+  owner,
+  name: "web",
+});
+
+const layerWithAccounts = layerTest.pipe(
+  Layer.provide(
+    Layer.mergeAll(
+      Layer.mock(RepositoryIdentityResolver.RepositoryIdentityResolver)({
+        resolve: (cwd) =>
+          Effect.succeed(
+            cwd === "/enterprise-worktree"
+              ? identityFor("acme", "github.acme-corp.example")
+              : identityFor(cwd === "/project-worktree" ? "acme" : "someone"),
+          ),
+      }),
+      Layer.mock(GitHubCredentials.GitHubCredentials)({
+        accountFor: (_host, repository) =>
+          Effect.succeed(repository === "acme/web" ? "work" : undefined),
+        get: (host, repository) =>
+          Effect.sync(() => {
+            tokenReads.push(repository);
+            return {
+              host,
+              token: Redacted.make("work-token"),
+              source: "gh" as const,
+              fingerprint: "fingerprint",
+              account: "work",
+            };
+          }),
+      }),
+    ),
+  ),
+);
+
+it.layer(layerWithAccounts)("RuntimePolicyV2 with GitHub accounts", (it) => {
+  it.effect("hands the agent the token of the account its repository reads as", () =>
+    Effect.gen(function* () {
+      const policy = yield* RuntimePolicy.RuntimePolicyV2;
+      const now = yield* DateTime.now;
+      const company = yield* policy.resolve({
+        thread: makeThread({ now, worktreePath: "/project-worktree" }),
+        modelSelection,
+      });
+      assert.deepEqual(ProviderAdapter.runtimePolicyEnvironment(company), {
+        GH_TOKEN: "work-token",
+      });
+      assert.notInclude(JSON.stringify(company), "work-token");
+
+      const personal = yield* policy.resolve({
+        thread: makeThread({ now, worktreePath: null }),
+        modelSelection,
+      });
+      assert.isUndefined(personal.environment);
+      assert.deepEqual(tokenReads, ["acme/web"]);
+
+      // gh would send an Enterprise Server token to any host a command names, so none is handed
+      // out there, even where a rule picks an account.
+      const enterprise = yield* policy.resolve({
+        thread: makeThread({ now, worktreePath: "/enterprise-worktree" }),
+        modelSelection,
+      });
+      assert.isUndefined(enterprise.environment);
+      assert.deepEqual(tokenReads, ["acme/web"]);
     }),
   );
 });

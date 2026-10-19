@@ -1,3 +1,5 @@
+import * as NodeCrypto from "node:crypto";
+
 import type { OrchestrationV2HistoricalMessage } from "@t3tools/contracts";
 import {
   ChatAttachment,
@@ -35,6 +37,7 @@ import {
   TurnItemId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
+import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 import type * as Effect from "effect/Effect";
 import type * as Scope from "effect/Scope";
@@ -52,7 +55,32 @@ export const ProviderAdapterV2RuntimePolicy = Schema.Struct({
   approvalPolicy: Schema.optional(Schema.Unknown),
   sandboxPolicy: Schema.optional(Schema.Unknown),
   reasoningEffort: Schema.optional(Schema.String),
+  /** Workspace process overrides; secrets stay redacted until the adapter boundary. */
+  environment: Schema.optional(Schema.Record(Schema.String, Schema.Redacted(Schema.String))),
 });
+
+/** The policy's workspace variables as plain values, for a process's environment. */
+export function runtimePolicyEnvironment(
+  policy: Pick<ProviderAdapterV2RuntimePolicy, "environment"> | null | undefined,
+): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(policy?.environment ?? {}).map(([name, value]) => [name, Redacted.value(value)]),
+  );
+}
+
+/** Process reuse must distinguish secret values without putting them in keys or logs. */
+export function runtimePolicyEnvironmentKey(
+  policy: Pick<ProviderAdapterV2RuntimePolicy, "environment"> | null | undefined,
+): string {
+  return JSON.stringify(
+    Object.entries(policy?.environment ?? {})
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([name, value]) => [
+        name,
+        NodeCrypto.createHash("sha256").update(Redacted.value(value)).digest("hex"),
+      ]),
+  );
+}
 export type ProviderAdapterV2RuntimePolicy = typeof ProviderAdapterV2RuntimePolicy.Type;
 
 export const ProviderAdapterV2TurnMessage = Schema.Struct({

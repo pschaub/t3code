@@ -1306,11 +1306,18 @@ export function codexThreadRuntimeParams(input: {
   readonly config: Readonly<Record<string, Schema.Json>>;
 } {
   const { mcpSession } = input;
+  // A shared app-server requires thread-scoped shell overrides. Protocol logging redacts TOKEN keys.
+  const environment = Object.fromEntries(
+    Object.entries(ProviderAdapter.runtimePolicyEnvironment(input.runtimePolicy)).map(
+      ([name, value]) => [`shell_environment_policy.set.${name}`, value],
+    ),
+  );
   return {
     ...(input.runtimePolicy?.cwd == null ? {} : { cwd: input.runtimePolicy.cwd }),
     ...(input.modelSelection === undefined ? {} : { model: input.modelSelection.model }),
     config: {
       ...CODEX_THREAD_CONFIG,
+      ...environment,
       ...(mcpSession === undefined
         ? {}
         : {

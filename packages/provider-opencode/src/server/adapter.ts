@@ -947,7 +947,11 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
           binaryPath: options.settings.binaryPath,
           directory: cwd,
           serverUrl: options.settings.serverUrl,
-          environment: options.environment,
+          // External servers keep the environment they were started with.
+          environment: {
+            ...options.environment,
+            ...ProviderAdapter.runtimePolicyEnvironment(input.runtimePolicy),
+          },
         });
         const client = runtime.createOpenCodeSdkClient({
           baseUrl: connection.url,

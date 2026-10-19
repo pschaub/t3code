@@ -60,6 +60,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
+import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 import * as Scheduler from "effect/Scheduler";
 import * as Scope from "effect/Scope";
@@ -2632,6 +2633,64 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       };
     });
   const makeWakeHarness = makeWakeHarnessWithOptions();
+
+  it.effect("reuses the query until the workspace credential rotates or is cleared", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeWakeHarnessWithOptions({
+        environment: { BASE: "preserved" },
+        freshQueueOnReopen: true,
+        close: Queue.shutdown,
+      });
+      const now = yield* DateTime.now;
+      const tokens = ["work-token", "work-token", "personal-token", undefined];
+      for (const [index, token] of tokens.entries()) {
+        const previous = harness.processQueues.at(-1);
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now,
+            attemptId: RunAttemptId.make(`credential-turn-${index}`),
+            providerTurnOrdinal: index + 1,
+            runtimePolicy: {
+              ...CLAUDE_TEST_RUNTIME_POLICY,
+              ...(token === undefined ? {} : { environment: { GH_TOKEN: Redacted.make(token) } }),
+            },
+            text: "Continue.",
+            attachments: [],
+          }),
+        );
+        const current = harness.processQueues.at(-1)!;
+        assert.lengthOf(harness.processQueues, index === 0 ? 1 : index);
+        assert.equal(harness.getOpenedOptions()?.env?.GH_TOKEN, token);
+        assert.equal(harness.getOpenedOptions()?.env?.BASE, "preserved");
+        if (index === 1) assert.strictEqual(current, previous);
+        if (index > 1) {
+          assert.notStrictEqual(current, previous);
+          assert.isFalse(
+            yield* Queue.offer(
+              previous!,
+              makeResultFrame({ uuid: "closed-query", result: "ignored" }),
+            ),
+          );
+        }
+        yield* Queue.offer(
+          current,
+          makeResultFrame({
+            uuid: `credential-result-${index}`,
+            result: "Done.",
+          }),
+        );
+        yield* Queue.take(harness.terminalReceipts);
+      }
+      assert.notInclude(JSON.stringify(harness.events), "work-token");
+      assert.notInclude(JSON.stringify(harness.events), "personal-token");
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+      ),
+    ),
+  );
 
   it.effect.each([
     { isError: false, title: "Check weather" },
