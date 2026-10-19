@@ -1925,6 +1925,14 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                 if (child.status !== "running") continue;
                 child.status = "failed";
                 child.result = null;
+              }
+              for (const child of nativeChildren.values()) {
+                if (
+                  child.subagent === undefined ||
+                  acpSubagentStatusIsTerminal(child.subagent.task.status)
+                )
+                  continue;
+                child.result = null;
                 yield* publishNativeChildStatus(child, "failed");
               }
               agentRequests.clear();
@@ -3398,8 +3406,18 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             yield* emitSubagent(context, subagentUpdate);
             if (followsAgentWorkState) yield* syncNativeChildren(context);
             if (subagentUpdate.suppressNormalTool !== false) {
-              yield* rearmDeferredFinalize(context);
-              return;
+              // Native agents can stream partial arguments before a tool becomes a subagent.
+              if (
+                followsAgentWorkState &&
+                previous !== undefined &&
+                extractSubagentUpdate(previous) === undefined &&
+                context.toolStartedAt.has(toolCall.toolCallId)
+              ) {
+                projectedStatus = toolStatus(toolCall.status) === "failed" ? "failed" : "completed";
+              } else {
+                yield* rearmDeferredFinalize(context);
+                return;
+              }
             }
           }
           if (
