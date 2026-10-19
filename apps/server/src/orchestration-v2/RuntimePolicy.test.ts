@@ -157,6 +157,7 @@ it.layer(layerTest)("RuntimePolicyV2", (it) => {
 });
 
 const tokenReads: Array<string | null | undefined> = [];
+const repositoryReads: Array<string> = [];
 const identityFor = (owner: string, host = "github.com") => ({
   canonicalKey: `${host}/${owner}/web`,
   locator: {
@@ -173,11 +174,12 @@ const layerWithAccounts = layerTest.pipe(
     Layer.mergeAll(
       Layer.mock(RepositoryIdentityResolver.RepositoryIdentityResolver)({
         resolve: (cwd) =>
-          Effect.succeed(
-            cwd === "/enterprise-worktree"
+          Effect.sync(() => {
+            repositoryReads.push(cwd);
+            return cwd === "/enterprise-worktree"
               ? identityFor("acme", "github.acme-corp.example")
-              : identityFor(cwd === "/project-worktree" ? "acme" : "someone"),
-          ),
+              : identityFor(cwd === "/project-worktree" ? "acme" : "someone");
+          }),
       }),
       Layer.mock(GitHubCredentials.GitHubCredentials)({
         accountFor: (_host, repository) =>
@@ -199,22 +201,34 @@ const layerWithAccounts = layerTest.pipe(
 );
 
 it.layer(layerWithAccounts)("RuntimePolicyV2 with GitHub accounts", (it) => {
-  it.effect("hands the agent the token of the account its repository reads as", () =>
+  it.effect("resolves repository credentials only when opening a provider session", () =>
     Effect.gen(function* () {
       const policy = yield* RuntimePolicy.RuntimePolicyV2;
       const now = yield* DateTime.now;
-      const company = yield* policy.resolve({
+      const input = {
         thread: makeThread({ now, worktreePath: "/project-worktree" }),
         modelSelection,
+      };
+      const dispatch = yield* policy.resolve(input);
+      assert.equal(dispatch.cwd, "/project-worktree");
+      assert.deepEqual(repositoryReads, []);
+      assert.deepEqual(tokenReads, []);
+      assert.isUndefined(dispatch.environment);
+
+      const company = yield* policy.resolve({
+        ...input,
+        includeEnvironment: true,
       });
       assert.deepEqual(ProviderAdapter.runtimePolicyEnvironment(company), {
         GH_TOKEN: "work-token",
       });
       assert.notInclude(JSON.stringify(company), "work-token");
+      assert.deepEqual(repositoryReads, ["/project-worktree"]);
 
       const personal = yield* policy.resolve({
         thread: makeThread({ now, worktreePath: null }),
         modelSelection,
+        includeEnvironment: true,
       });
       assert.isUndefined(personal.environment);
       assert.deepEqual(tokenReads, ["acme/web"]);
@@ -224,6 +238,7 @@ it.layer(layerWithAccounts)("RuntimePolicyV2 with GitHub accounts", (it) => {
       const enterprise = yield* policy.resolve({
         thread: makeThread({ now, worktreePath: "/enterprise-worktree" }),
         modelSelection,
+        includeEnvironment: true,
       });
       assert.isUndefined(enterprise.environment);
       assert.deepEqual(tokenReads, ["acme/web"]);

@@ -46,6 +46,7 @@ export interface RuntimePolicyV2Shape {
   readonly resolve: (input: {
     readonly thread: OrchestrationV2AppThread;
     readonly modelSelection: ModelSelection;
+    readonly includeEnvironment?: boolean;
   }) => Effect.Effect<ProviderAdapter.ProviderAdapterV2RuntimePolicy, RuntimePolicyV2Error>;
 }
 
@@ -129,7 +130,7 @@ export const layerFromProjectStore: Layer.Layer<
               }),
             ),
           ));
-        const environment = yield* workspaceEnvironment(cwd);
+        const environment = input.includeEnvironment ? yield* workspaceEnvironment(cwd) : {};
         return ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
           runtimeMode: providerRuntimeMode(input.thread.runtimeMode, supportedRuntimeModes),
           interactionMode: input.thread.interactionMode,

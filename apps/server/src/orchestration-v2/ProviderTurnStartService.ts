@@ -516,6 +516,7 @@ export const layer: Layer.Layer<
       const resolvedRuntimePolicy = yield* runtimePolicy.resolve({
         thread: projection.thread,
         modelSelection: run.modelSelection,
+        includeEnvironment: true,
       });
       const existingSessionProjection = projection.providerSessions.find(
         (candidate) => candidate.id === providerSessionId,

@@ -36,13 +36,23 @@ to remove the saved rule. **Mine** and **Reviewing** use the accounts selected f
 On mobile, host and owner choices are under **Settings → Source control → GitHub accounts**;
 select a project in Settings for its repository override.
 
+These rules apply to T3 Code's GitHub API reads and writes. Git checkout, fetch, and push still
+use Git's configured credential helper or SSH credentials.
+
+Update the server and every client connected to it before using owner or repository rules.
+Older clients can erase these rules when changing a host's account. Newer clients connected to
+older servers may display rules that the server ignores.
+
 Agents using Codex, Claude, Grok, Antigravity, OpenCode 1.x, Pi, Muse, or a registry ACP agent receive
-the selected account's token as `GH_TOKEN` for github.com and GHE.com. Claude applies changes before
-the next user turn; if background work is still running, finish it or stop the thread first. Restart
-other agents' sessions after changing an account. Cursor, OpenCode 2.x, and externally hosted
-OpenCode servers keep their server process's credentials. On GitHub Enterprise Server, agents keep
-using `gh`'s host-specific login. A saved token or environment token takes precedence over account
-choices for T3 Code's GitHub requests; a host turned off stays off either way.
+the selected `gh` account's token as `GH_TOKEN` for github.com and GHE.com when no saved or
+environment token takes precedence. A token saved in Settings suppresses this override; agents
+retain their own inherited environment or `gh` credentials instead of receiving the saved token.
+Claude applies changes before the next user turn; if background work is still running, finish it
+or stop the thread first. Restart other agents' sessions after changing an account. Cursor,
+OpenCode 2.x, and externally hosted OpenCode servers keep their server process's credentials.
+On GitHub Enterprise Server, agents keep using `gh`'s host-specific login. A saved token or
+environment token takes precedence over account choices for T3 Code's GitHub requests; a host
+turned off stays off either way.
 
 For GitHub Enterprise, sign in with `gh auth login --hostname YOUR_HOST`. T3 Code treats a
 custom server name as GitHub once it has a credential for that host.
