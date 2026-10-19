@@ -1242,11 +1242,79 @@ export const layer: Layer.Layer<
           // when finally written, behind every item that began after it.
           const reservedHeldTurnItemIds = new Set<TurnItemId>();
           const providerEventFiber = yield* eventSubscription.events.pipe(
-            Stream.filterEffect((event) =>
-              Ref.modify(eventRouting, (state) => routeProviderEvent(event, routeIdentity, state)),
-            ),
-            Stream.tap((event) =>
+            Stream.mapEffect((event) =>
               Effect.gen(function* () {
+                const previous = yield* Ref.get(eventRouting);
+                const [accepted, routing] = routeProviderEvent(event, routeIdentity, previous);
+                yield* Ref.set(eventRouting, routing);
+                if (
+                  event.type === "subagent.updated" &&
+                  event.subagent.childThreadId !== null &&
+                  previous.ownedThreadIds.has(event.subagent.childThreadId) &&
+                  !routing.ownedThreadIds.has(event.subagent.childThreadId)
+                ) {
+                  const moved = event.subagent;
+                  const detachedItems = yield* Ref.modify(openRunOwnedSubagents, (current) => {
+                    const childTurnItems = new Map(
+                      [...current.childTurnItems].filter(
+                        ([, item]) => item.threadId !== moved.childThreadId,
+                      ),
+                    );
+                    const turnItems = new Map(current.turnItems);
+                    turnItems.delete(moved.id);
+                    const detachedItems = new Set(
+                      [...current.childTurnItems.values(), ...current.turnItems.values()]
+                        .filter(
+                          (item) =>
+                            item.threadId === moved.childThreadId || item.nodeId === moved.id,
+                        )
+                        .map((item) => item.id),
+                    );
+                    return [
+                      detachedItems,
+                      {
+                        subagents: new Map(
+                          [...current.subagents].filter(
+                            ([id, subagent]) =>
+                              id !== moved.id && subagent.threadId !== moved.childThreadId,
+                          ),
+                        ),
+                        turnItems,
+                        childTurnItems,
+                        nodes: new Map(
+                          [...current.nodes].filter(
+                            ([id, node]) =>
+                              id !== moved.id && node.threadId !== moved.childThreadId,
+                          ),
+                        ),
+                        linkedChildThreadIds: new Set(
+                          [...current.linkedChildThreadIds].filter(
+                            (id) => id !== moved.childThreadId,
+                          ),
+                        ),
+                      },
+                    ];
+                  });
+                  yield* Ref.update(
+                    activeChildSubagents,
+                    (current) => new Set([...current].filter((id) => id !== moved.id)),
+                  );
+                  yield* Ref.update(
+                    activeChildProviderTurns,
+                    (current) =>
+                      new Set([...current].filter((id) => routing.ownedProviderTurns.has(id))),
+                  );
+                  yield* Ref.update(
+                    activeBackgroundTurnItems,
+                    (current) => new Set([...current].filter((id) => !detachedItems.has(id))),
+                  );
+                }
+                return { event, accepted };
+              }),
+            ),
+            Stream.tap(({ event, accepted }) =>
+              Effect.gen(function* () {
+                if (!accepted) return;
                 let storedEventCount = 0;
                 const deliveredEvent = filterAssistantEvent(
                   event,

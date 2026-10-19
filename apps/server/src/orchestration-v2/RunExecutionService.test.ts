@@ -1875,6 +1875,48 @@ it.effect("keeps ingesting a child thread's late background item completion", ()
   }),
 );
 
+it.effect("releases a settled run when its live child transfers to another run", () =>
+  Effect.gen(function* () {
+    const consumed = yield* Deferred.make<void>();
+    const result = yield* Effect.raceFirst(
+      runBackgroundItemScenario(
+        "child-transfer-release",
+        (ids) => {
+          const running = subagentEvent(ids, "running");
+          if (running.type !== "subagent.updated") throw new Error("Missing subagent");
+          const linked = {
+            ...running,
+            subagent: {
+              ...running.subagent,
+              origin: "provider_native" as const,
+              childThreadId: ids.childThreadId,
+              providerThreadId: null,
+            },
+          };
+          return [
+            childThreadCreatedEvent(ids),
+            linked,
+            childBackgroundTurnItemEvent(ids, "running", 1),
+            rootTerminalEvent(ids, "completed"),
+            { ...linked, subagent: { ...linked.subagent, runId: RunId.make("run:replacement") } },
+          ];
+        },
+        {
+          keepEventStreamOpen: true,
+          onEventsConsumed: Deferred.succeed(consumed, undefined).pipe(Effect.asVoid),
+        },
+      ).pipe(Effect.map(Option.some)),
+      Deferred.await(consumed).pipe(Effect.as(Option.none())),
+    );
+    assert.isTrue(
+      Option.isSome(result),
+      "the transferred child must release its prior subscription",
+    );
+    if (Option.isSome(result))
+      assert.deepEqual(result.value, ["subagent:running", "turn_item:running", "root-finalized"]);
+  }),
+);
+
 it.effect("keeps ingesting until the last of several background items terminalizes", () =>
   Effect.gen(function* () {
     const secondItemId = TurnItemId.make("turn-item:bg-multi:second");
@@ -4512,6 +4554,7 @@ function runBackgroundItemScenario(
       ReadonlyArray<{ readonly id: TurnItemId; readonly runId: RunId }>
     >;
     readonly onSubscribe?: Effect.Effect<void>;
+    readonly onEventsConsumed?: Effect.Effect<void>;
     readonly onFinalized?: (
       events: ReadonlyArray<OrchestrationV2DomainEvent>,
     ) => Effect.Effect<void>;
@@ -4579,7 +4622,11 @@ function runBackgroundItemScenario(
           events: Stream.empty,
           subscribeEvents: Effect.gen(function* () {
             yield* options?.onSubscribe ?? Effect.void;
-            const events = Stream.fromIterable(makeEvents(ids));
+            const events = Stream.fromIterable(makeEvents(ids)).pipe(
+              Stream.concat(
+                Stream.fromEffect(options?.onEventsConsumed ?? Effect.void).pipe(Stream.drain),
+              ),
+            );
             return {
               events:
                 options?.keepEventStreamOpen === true
