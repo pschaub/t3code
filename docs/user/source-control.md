@@ -45,8 +45,10 @@ older servers may display rules that the server ignores.
 
 Agents using Codex, Claude, Grok, Antigravity, OpenCode 1.x, Pi, Muse, or a registry ACP agent receive
 the selected `gh` account's token as `GH_TOKEN` for github.com and GHE.com when no saved or
-environment token takes precedence. A token saved in Settings suppresses this override; agents
-retain their own inherited environment or `gh` credentials instead of receiving the saved token.
+environment token takes precedence. This token applies to all GitHub.com/GHE.com commands in
+that agent session; use a separate session or clear `GH_TOKEN` when switching platforms.
+A token saved in Settings suppresses this override; agents retain their own inherited environment
+or `gh` credentials instead of receiving the saved token.
 Claude applies changes before the next user turn; if background work is still running, finish it
 or stop the thread first. Restart other agents' sessions after changing an account. Cursor,
 OpenCode 2.x, and externally hosted OpenCode servers keep their server process's credentials.

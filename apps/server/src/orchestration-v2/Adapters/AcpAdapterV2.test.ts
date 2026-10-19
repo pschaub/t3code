@@ -46,6 +46,7 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
 import * as Queue from "effect/Queue";
+import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
@@ -2485,7 +2486,7 @@ describe("AcpAdapterV2", () => {
           makeRuntime,
         },
         selfInvocation,
-        clientTerminals: {},
+        clientTerminals: { environment: { GH_TOKEN: "base-token", ACP_BASE: "base" } },
       });
       const sourceThreadId = ThreadId.make("thread-acp-native-fork-source");
       const targetThreadId = ThreadId.make("thread-acp-native-fork-target");
@@ -2511,6 +2512,7 @@ describe("AcpAdapterV2", () => {
         runtimeMode: "full-access",
         interactionMode: "default",
         cwd: process.cwd(),
+        environment: { GH_TOKEN: Redacted.make("workspace-token") },
       });
       const modelSelection = { instanceId, model: "default" } as const;
       const runtime = yield* adapter.openSession({
@@ -2613,7 +2615,11 @@ describe("AcpAdapterV2", () => {
         {
           sessionId: "mock-session-1-fork",
           command: process.execPath,
-          args: ["-e", "process.stdout.write(process.env.T3_ACP_MCP_AUTHORIZATION ?? '')"],
+          args: [
+            "-e",
+            "process.stdout.write(JSON.stringify([process.env.GH_TOKEN, process.env.ACP_BASE, process.env.T3_ACP_MCP_AUTHORIZATION, process.env.ACP_REQUEST]))",
+          ],
+          env: [{ name: "ACP_REQUEST", value: "request" }],
         },
         { requestId: "test-terminal-create", method: "terminal/create" },
       );
@@ -2631,7 +2637,12 @@ describe("AcpAdapterV2", () => {
         },
         { requestId: "test-terminal-output", method: "terminal/output" },
       );
-      assert.equal(terminalOutput.output, "Bearer target-thread-token");
+      assert.deepEqual(JSON.parse(terminalOutput.output), [
+        "workspace-token",
+        "base",
+        "Bearer target-thread-token",
+        "request",
+      ]);
     }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 

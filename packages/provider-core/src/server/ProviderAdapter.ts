@@ -1,3 +1,4 @@
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- Reuse keys need synchronous SHA-256 outside Effect; Crypto.digest is effectful.
 import * as NodeCrypto from "node:crypto";
 
 import type { OrchestrationV2HistoricalMessage } from "@t3tools/contracts";
