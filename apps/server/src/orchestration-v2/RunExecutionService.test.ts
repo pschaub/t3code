@@ -327,6 +327,141 @@ it("routes only enrolled workflow members after the root turn ends", () => {
   );
 });
 
+it("moves a child thread to the run that shows its subagent now", () => {
+  const threadId = ThreadId.make("thread:handoff");
+  const rootProviderTurnId = ProviderTurnId.make("provider-turn:handoff");
+  const identity: RunExecutionService.ProviderEventRouteIdentity = {
+    threadId,
+    runId: RunId.make("run:handoff:1"),
+    attemptId: RunAttemptId.make("attempt:handoff:1"),
+    providerThreadId: ProviderThreadId.make("provider-thread:handoff"),
+  };
+  const resumedChild = ThreadId.make("thread:handoff:resumed");
+  const siblingChild = ThreadId.make("thread:handoff:sibling");
+  const providerThreadOf = (childThreadId: ThreadId) =>
+    ProviderThreadId.make(`provider-thread:${childThreadId}`);
+  const subagent = (childThreadId: ThreadId, runId: RunId): OrchestrationV2Subagent => ({
+    id: NodeId.make(`node:${childThreadId}`),
+    threadId,
+    runId,
+    parentNodeId: NodeId.make("node:handoff"),
+    origin: "provider_native",
+    createdBy: "agent",
+    driver,
+    providerInstanceId: ProviderInstanceId.make("codex"),
+    providerThreadId: providerThreadOf(childThreadId),
+    childThreadId,
+    nativeTaskRef: null,
+    prompt: "Work",
+    title: "Work",
+    model: null,
+    status: "running",
+    result: null,
+    startedAt: null,
+    completedAt: null,
+    updatedAt: DateTime.makeUnsafe(0),
+  });
+  const childMessage = (childThreadId: ThreadId) =>
+    ({
+      type: "message.updated",
+      driver,
+      message: {
+        id: MessageId.make(`message:${childThreadId}`),
+        threadId: childThreadId,
+        runId: null,
+      },
+    }) as ProviderAdapter.ProviderAdapterV2Event;
+  const childTurn = (childThreadId: ThreadId, ordinal: number) =>
+    ({
+      type: "provider_turn.updated",
+      driver,
+      providerTurn: {
+        id: ProviderTurnId.make(`provider-turn:${childThreadId}:${ordinal}`),
+        providerThreadId: providerThreadOf(childThreadId),
+        runAttemptId: null,
+        status: "running",
+      },
+    }) as ProviderAdapter.ProviderAdapterV2Event;
+  const ended = RunExecutionService.routeProviderEvent(
+    {
+      type: "turn.terminal",
+      driver,
+      providerThreadId: identity.providerThreadId,
+      providerTurnId: rootProviderTurnId,
+      runOrdinal: 1,
+      status: "completed",
+      failure: null,
+      threadDisposition: "reusable",
+    },
+    identity,
+    RunExecutionService.makeProviderEventRoutingState({
+      identity,
+      providerTurnId: rootProviderTurnId,
+      relatedThreadIds: [resumedChild, siblingChild],
+      relatedProviderThreadIds: [providerThreadOf(resumedChild), providerThreadOf(siblingChild)],
+    }),
+  )[1];
+  const [firstTurnAccepted, withChildTurn] = RunExecutionService.routeProviderEvent(
+    childTurn(resumedChild, 1),
+    identity,
+    ended,
+  );
+  assert.isTrue(firstTurnAccepted);
+  const [movedAccepted, afterMove] = RunExecutionService.routeProviderEvent(
+    {
+      type: "subagent.updated",
+      driver,
+      subagent: subagent(resumedChild, RunId.make("run:handoff:2")),
+    },
+    identity,
+    withChildTurn,
+  );
+  assert.isFalse(movedAccepted);
+  assert.isFalse(
+    RunExecutionService.routeProviderEvent(childMessage(resumedChild), identity, afterMove)[0],
+  );
+  assert.isTrue(
+    RunExecutionService.routeProviderEvent(childMessage(siblingChild), identity, afterMove)[0],
+  );
+  assert.isFalse(
+    RunExecutionService.routeProviderEvent(childTurn(resumedChild, 1), identity, afterMove)[0],
+  );
+  assert.isFalse(
+    RunExecutionService.routeProviderEvent(childTurn(resumedChild, 2), identity, afterMove)[0],
+  );
+  assert.isTrue(
+    RunExecutionService.routeProviderEvent(childTurn(siblingChild, 1), identity, afterMove)[0],
+  );
+  assert.isTrue(
+    RunExecutionService.routeProviderEvent(
+      { type: "subagent.updated", driver, subagent: subagent(siblingChild, identity.runId) },
+      identity,
+      afterMove,
+    )[0],
+  );
+  const resuming: RunExecutionService.ProviderEventRouteIdentity = {
+    ...identity,
+    runId: RunId.make("run:handoff:2"),
+    attemptId: RunAttemptId.make("attempt:handoff:2"),
+  };
+  const resumingState = RunExecutionService.makeProviderEventRoutingState({
+    identity: resuming,
+    providerTurnId: ProviderTurnId.make("provider-turn:handoff:2"),
+  });
+  assert.isFalse(
+    RunExecutionService.routeProviderEvent(childMessage(resumedChild), resuming, resumingState)[0],
+  );
+  const [moveAccepted, afterTake] = RunExecutionService.routeProviderEvent(
+    { type: "subagent.updated", driver, subagent: subagent(resumedChild, resuming.runId) },
+    resuming,
+    resumingState,
+  );
+  assert.isTrue(moveAccepted);
+  assert.isTrue(
+    RunExecutionService.routeProviderEvent(childMessage(resumedChild), resuming, afterTake)[0],
+  );
+});
+
 it("does not route a superseded attempt through a reused provider thread", () => {
   const threadId = ThreadId.make("thread:shared-runtime:restart");
   const providerThreadId = ProviderThreadId.make("provider-thread:shared-runtime:restart");

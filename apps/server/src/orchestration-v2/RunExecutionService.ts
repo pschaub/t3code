@@ -60,7 +60,7 @@ export interface ProviderEventRoutingState {
   readonly rootTurnEnded: boolean;
   readonly workflowMemberParents: ReadonlyMap<ThreadId, ThreadId>;
   readonly ownedProviderThreadIds: ReadonlySet<ProviderThreadId>;
-  readonly ownedProviderTurnIds: ReadonlySet<ProviderTurnId>;
+  readonly ownedProviderTurns: ReadonlyMap<ProviderTurnId, ProviderThreadId>;
   readonly inheritedBackgroundTurnItems: ReadonlyMap<TurnItemId, OrchestrationV2Run["id"]>;
   readonly rootProviderTurnId: ProviderTurnId | null;
 }
@@ -337,8 +337,10 @@ export function makeProviderEventRoutingState(input: {
       input.identity.providerThreadId,
       ...(input.relatedProviderThreadIds ?? []),
     ]),
-    ownedProviderTurnIds:
-      input.providerTurnId === null ? new Set() : new Set([input.providerTurnId]),
+    ownedProviderTurns:
+      input.providerTurnId === null
+        ? new Map()
+        : new Map([[input.providerTurnId, input.identity.providerThreadId]]),
     inheritedBackgroundTurnItems: new Map(
       (input.inheritedBackgroundTurnItems ?? []).map((item) => [item.id, item.runId]),
     ),
@@ -361,10 +363,11 @@ export function routeProviderEvent(
   });
   const addProviderTurn = (
     providerTurnId: ProviderTurnId,
+    providerThreadId: ProviderThreadId,
     root: boolean,
   ): ProviderEventRoutingState => ({
     ...state,
-    ownedProviderTurnIds: new Set([...state.ownedProviderTurnIds, providerTurnId]),
+    ownedProviderTurns: new Map(state.ownedProviderTurns).set(providerTurnId, providerThreadId),
     rootProviderTurnId: root ? providerTurnId : state.rootProviderTurnId,
   });
 
@@ -405,9 +408,14 @@ export function routeProviderEvent(
         isRoot ||
         (event.providerTurn.providerThreadId !== input.providerThreadId &&
           state.ownedProviderThreadIds.has(event.providerTurn.providerThreadId)) ||
-        state.ownedProviderTurnIds.has(event.providerTurn.id) ||
+        state.ownedProviderTurns.has(event.providerTurn.id) ||
         (event.threadId !== undefined && ownsChildThread(event.threadId));
-      return belongs ? [true, addProviderTurn(event.providerTurn.id, isRoot)] : [false, state];
+      return belongs
+        ? [
+            true,
+            addProviderTurn(event.providerTurn.id, event.providerTurn.providerThreadId, isRoot),
+          ]
+        : [false, state];
     }
     case "node.updated": {
       const belongs = ownsRun(event.node.runId) || ownsChildThread(event.node.threadId);
@@ -417,6 +425,25 @@ export function routeProviderEvent(
       return [true, addProviderThread(event.node.providerThreadId)];
     }
     case "subagent.updated": {
+      const moved = event.subagent;
+      if (
+        moved.origin === "provider_native" &&
+        moved.threadId === input.threadId &&
+        moved.runId !== null &&
+        !ownsRun(moved.runId) &&
+        moved.childThreadId !== null &&
+        ownsChildThread(moved.childThreadId)
+      ) {
+        const ownedThreadIds = new Set(state.ownedThreadIds);
+        ownedThreadIds.delete(moved.childThreadId);
+        const ownedProviderThreadIds = new Set(state.ownedProviderThreadIds);
+        if (moved.providerThreadId !== null) ownedProviderThreadIds.delete(moved.providerThreadId);
+        const ownedProviderTurns = new Map(state.ownedProviderTurns);
+        for (const [turnId, threadId] of ownedProviderTurns) {
+          if (threadId === moved.providerThreadId) ownedProviderTurns.delete(turnId);
+        }
+        return [false, { ...state, ownedThreadIds, ownedProviderThreadIds, ownedProviderTurns }];
+      }
       const belongs = ownsRun(event.subagent.runId) || ownsChildThread(event.subagent.threadId);
       const coordinator = event.subagent;
       // A provider-native subagent's child thread follows the live run it is
@@ -478,7 +505,7 @@ export function routeProviderEvent(
       return [
         (event.threadId !== undefined && ownsChildThread(event.threadId)) ||
           (event.runtimeRequest.providerTurnId !== null &&
-            state.ownedProviderTurnIds.has(event.runtimeRequest.providerTurnId)),
+            state.ownedProviderTurns.has(event.runtimeRequest.providerTurnId)),
         state,
       ];
     case "command_output.delta":
