@@ -81,18 +81,15 @@ function useGitHubAccountChoices(environment: SettingsTarget) {
   const save = async (host: string, change: Parameters<typeof nextGitHubHosts>[2]) => {
     if (saving) return;
     setSaving(true);
-    try {
-      await updateSettings({
-        environmentId,
-        input: {
-          patch: {
-            sourceControlHosts: { github: { hosts: nextGitHubHosts(hosts, host, change) } },
-          },
+    await updateSettings({
+      environmentId,
+      input: {
+        patch: {
+          sourceControlHosts: { github: { hosts: nextGitHubHosts(hosts, host, change) } },
         },
-      });
-    } finally {
-      setSaving(false);
-    }
+      },
+    });
+    setSaving(false);
   };
   return { discovery, github, projects, writable, saving, hosts, groups, save };
 }
@@ -196,7 +193,11 @@ function HostAccounts(props: {
         <SettingsSection key={owner} title={owner}>
           <AccountChoices
             accounts={group.selectable}
-            selected={choice?.owners?.[owner] ?? null}
+            selected={
+              choice?.owners && Object.hasOwn(choice.owners, owner)
+                ? (choice.owners[owner] ?? null)
+                : null
+            }
             defaultLabel={`Default${hostAccount ? ` (${hostAccount})` : ""}`}
             disabled={props.disabled}
             onSelect={(account) => props.onOwner(owner, account)}

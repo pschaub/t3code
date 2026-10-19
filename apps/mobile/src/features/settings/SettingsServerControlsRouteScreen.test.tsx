@@ -37,6 +37,9 @@ vi.mock("./components/SettingsSection", () => ({ SettingsSection: Children }));
 vi.mock("./components/SettingsChoiceRow", () => ({ SettingsChoiceRow: () => null }));
 vi.mock("./components/SettingsSwitchRow", () => ({ SettingsSwitchRow: () => null }));
 vi.mock("./components/SettingsRow", () => ({ SettingsRow: () => null }));
+vi.mock("./SettingsGitHubAccountsRouteScreen", () => ({
+  ProjectGitHubAccountSection: () => null,
+}));
 vi.mock("./components/SettingsProjectOverridesSection", () => ({
   SettingsProjectOverridesSection: () => null,
 }));

@@ -299,7 +299,11 @@ export function GitHubAccountSettings({
                   <AccountRuleRow
                     key={owner}
                     name={owner}
-                    rule={choice?.owners?.[owner]}
+                    rule={
+                      choice?.owners && Object.hasOwn(choice.owners, owner)
+                        ? choice.owners[owner]
+                        : undefined
+                    }
                     accounts={group.selectable}
                     defaultLabel={
                       <DefaultLabel prefix="Default" account={hostAccount} revealed={revealed} />
@@ -405,28 +409,21 @@ export function ProjectGitHubAccountRow({
   const stale = rule !== undefined && !group.selectable.includes(rule);
   const save = async (account: string | null) => {
     setSaving(true);
-    try {
-      await updateSettings({
-        environmentId,
-        input: {
-          patch: {
-            sourceControlHosts: {
-              github: {
-                hosts: nextGitHubHosts(hosts, repository.host, {
-                  repositories: nextGitHubRules(
-                    choice?.repositories,
-                    repository.repository,
-                    account,
-                  ),
-                }),
-              },
+    await updateSettings({
+      environmentId,
+      input: {
+        patch: {
+          sourceControlHosts: {
+            github: {
+              hosts: nextGitHubHosts(hosts, repository.host, {
+                repositories: nextGitHubRules(choice?.repositories, repository.repository, account),
+              }),
             },
           },
         },
-      });
-    } finally {
-      setSaving(false);
-    }
+      },
+    });
+    setSaving(false);
   };
 
   return (
