@@ -26,7 +26,7 @@ import * as ConnectionWakeups from "../connection/wakeups.ts";
 import { safeErrorLogAttributes } from "../errors/safeLog.ts";
 import * as Persistence from "../platform/persistence.ts";
 import { runCachePersistence } from "./cachePersistence.ts";
-import { subscribeDynamic } from "../rpc/client.ts";
+import { subscribeDynamicWithSession } from "../rpc/client.ts";
 import type { RpcSession } from "../rpc/session.ts";
 import * as ShellSnapshotLoader from "./shellSnapshotHttp.ts";
 import type { DeferredShellSnapshot } from "./shellPullRequests.ts";
@@ -91,6 +91,8 @@ export const makeEnvironmentShellState = Effect.fn("EnvironmentShellState.make")
     error: Option.none(),
   });
   const awaitingCompletion = yield* Ref.make(false);
+  const synchronizedSnapshot = yield* Ref.make(false);
+  const synchronizedServerVersion = yield* Ref.make<string | null>(null);
   const lastAuthoritativeSession = yield* Ref.make<RpcSession | null>(null);
   const activeSubscriptionSession = yield* Ref.make<RpcSession | null>(null);
   const latestLiveSnapshot = yield* Ref.make<Option.Option<OrchestrationV2ShellSnapshot>>(
@@ -160,6 +162,7 @@ export const makeEnvironmentShellState = Effect.fn("EnvironmentShellState.make")
   );
   const setStreamError = (error: unknown) =>
     Ref.set(awaitingCompletion, false).pipe(
+      Effect.andThen(Ref.set(synchronizedSnapshot, false)),
       Effect.andThen(Effect.logWarning("Could not synchronize the environment shell.")),
       Effect.annotateLogs({
         environmentId,
@@ -179,20 +182,31 @@ export const makeEnvironmentShellState = Effect.fn("EnvironmentShellState.make")
   const snapshotWriteLock = yield* Semaphore.make(1);
 
   const applyItems = Effect.fn("EnvironmentShellState.applyItems")(function* (
-    items: ReadonlyArray<OrchestrationV2ShellStreamItem>,
+    items: ReadonlyArray<readonly [RpcSession, OrchestrationV2ShellStreamItem]>,
     pendingLinkIds?: ReadonlySet<ThreadId>,
   ) {
     const initial = yield* SubscriptionRef.get(state);
+    const activeSession = yield* Ref.get(activeSubscriptionSession);
     let waiting = yield* Ref.get(awaitingCompletion);
     let next = initial;
-    let receivedSnapshot = false;
-    for (const item of items) {
+    let snapshotSession: RpcSession | null = null;
+    for (const [session, item] of items) {
+      if (session !== activeSession) continue;
       if (item.kind === "synchronized") {
         waiting = false;
         if (Option.isSome(next.snapshot)) {
+          const serverVersion = yield* session.initialConfig.pipe(
+            Effect.map((config) => config.environment.serverVersion),
+            Effect.orElseSucceed(() => null),
+          );
+          yield* Ref.set(synchronizedServerVersion, serverVersion);
+          yield* Ref.set(synchronizedSnapshot, true);
           next = { ...next, status: "live", error: Option.none() };
         }
         continue;
+      }
+      if (item.kind === "snapshot" && item.resolvedRepositoryIdentityRoots === undefined) {
+        yield* Ref.set(synchronizedSnapshot, false);
       }
       const nextSnapshot =
         item.kind === "snapshot"
@@ -213,7 +227,7 @@ export const makeEnvironmentShellState = Effect.fn("EnvironmentShellState.make")
                   : snapshot,
             });
       if (nextSnapshot === null) continue;
-      receivedSnapshot ||= item.kind === "snapshot";
+      if (item.kind === "snapshot") snapshotSession = session;
       next = {
         snapshot: Option.some(nextSnapshot),
         status: waiting ? "synchronizing" : "live",
@@ -231,11 +245,8 @@ export const makeEnvironmentShellState = Effect.fn("EnvironmentShellState.make")
       yield* Ref.set(latestLiveSnapshot, next.snapshot);
     }
     yield* SubscriptionRef.set(state, next);
-    if (receivedSnapshot) {
-      const session = yield* Ref.get(activeSubscriptionSession);
-      if (session !== null) {
-        yield* Ref.set(lastAuthoritativeSession, session);
-      }
+    if (snapshotSession !== null) {
+      yield* Ref.set(lastAuthoritativeSession, snapshotSession);
     }
     if (next.snapshot !== initial.snapshot && Option.isSome(next.snapshot)) {
       yield* Queue.offer(persistence, next.snapshot.value);
@@ -317,21 +328,24 @@ export const makeEnvironmentShellState = Effect.fn("EnvironmentShellState.make")
 
   yield* setSynchronizing;
   yield* Effect.forkScoped(
-    subscribeDynamic(
+    subscribeDynamicWithSession(
       ORCHESTRATION_V2_WS_METHODS.subscribeShell,
       Effect.fn("EnvironmentShellState.makeSubscribeInput")(function* (session) {
         yield* Ref.set(activeSubscriptionSession, session);
-        const supportsCompletionMarker = yield* session.initialConfig.pipe(
-          Effect.map((config) => config.shellResumeCompletionMarker === true),
-          Effect.orElseSucceed(() => false),
-        );
+        const initialConfig = yield* session.initialConfig.pipe(Effect.orElseSucceed(() => null));
+        const supportsCompletionMarker = initialConfig?.shellResumeCompletionMarker === true;
         yield* Ref.set(awaitingCompletion, supportsCompletionMarker);
         yield* setSynchronizing;
 
-        // Foreground resubscriptions on the same live session can resume from
-        // the in-memory cursor. A new session reloads the authoritative HTTP
-        // snapshot so a valid cursor cannot preserve incomplete cached data.
-        const hasAuthoritativeSnapshot = (yield* Ref.get(lastAuthoritativeSession)) === session;
+        // Only completed in-memory syncs survive a session change. Disk caches and partial
+        // loads need a refresh; upgrades can rewrite projections without adding events.
+        const hasAuthoritativeSnapshot =
+          (yield* Ref.get(lastAuthoritativeSession)) === session ||
+          (supportsCompletionMarker &&
+            (yield* Ref.get(synchronizedSnapshot)) &&
+            (yield* Ref.get(synchronizedServerVersion)) ===
+              initialConfig.environment.serverVersion);
+        yield* Ref.set(synchronizedSnapshot, false);
         let canResume = hasAuthoritativeSnapshot;
         let current = yield* SubscriptionRef.get(state);
         if (!hasAuthoritativeSnapshot || Option.isNone(current.snapshot)) {
@@ -362,7 +376,7 @@ export const makeEnvironmentShellState = Effect.fn("EnvironmentShellState.make")
                 ? []
                 : httpSnapshot.value.threads.map((thread) => thread.id),
             );
-            yield* applyItems([{ kind: "snapshot", snapshot }], pendingLinkIds);
+            yield* applyItems([[session, { kind: "snapshot", snapshot }]], pendingLinkIds);
             canResume = true;
             current = yield* SubscriptionRef.get(state);
             if (Option.isSome(current.snapshot)) {
@@ -374,6 +388,7 @@ export const makeEnvironmentShellState = Effect.fn("EnvironmentShellState.make")
         if (!canResume || Option.isNone(current.snapshot)) {
           return supportsCompletionMarker ? { requestCompletionMarker: true as const } : {};
         }
+        yield* Ref.set(lastAuthoritativeSession, session);
         if (!supportsCompletionMarker) {
           yield* SubscriptionRef.update(state, (value) => ({
             ...value,

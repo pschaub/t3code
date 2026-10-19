@@ -9,6 +9,9 @@ import {
   ORCHESTRATION_PROTOCOL_HEADER,
   ORCHESTRATION_PROTOCOL_VERSION_TEXT,
   OrchestrationV2AppThread,
+  OrchestrationV2ShellSnapshot,
+  OrchestrationV2ShellSnapshotJson,
+  type ThreadPullRequestLink,
   OrchestrationV2TurnItem,
   OrchestrationV2ThreadTranscript,
   PROVIDER_SEND_TURN_MAX_FILE_BYTES,
@@ -41,11 +44,19 @@ import * as ThreadManagementService from "./ThreadManagementService.ts";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
 
-class TranscriptTestApi extends HttpApi.make("environment").add(
+class OrchestrationTestApi extends HttpApi.make("environment").add(
   EnvironmentHttpApi.groups.orchestration,
 ) {}
 const decodeTranscript = Schema.decodeUnknownEffect(
   Schema.toCodecJson(OrchestrationV2ThreadTranscript),
+);
+
+const decodeShellSnapshot = Schema.decodeUnknownEffect(
+  Schema.toCodecJson(OrchestrationV2ShellSnapshot),
+);
+
+const decodeShellSnapshotWire = Schema.decodeUnknownEffect(
+  Schema.toEncoded(OrchestrationV2ShellSnapshotJson),
 );
 
 const now = DateTime.makeUnsafe("2026-09-29T00:00:00.000Z");
@@ -96,27 +107,69 @@ const items = Schema.decodeUnknownSync(Schema.Array(OrchestrationV2TurnItem))(
   })),
 );
 
+const makeHttpHarness = Effect.fnUntraced(function* (allowed = () => true) {
+  const runtime = ProviderReplayHarness.layerWithRegistry(
+    { name: "orchestration-http" },
+    ProviderAdapterRegistry.layerFromAdapters([]),
+    { runEffectWorker: false },
+  );
+  const services = yield* Layer.build(
+    Layer.mergeAll(
+      runtime,
+      ThreadManagementService.layer.pipe(
+        Layer.provide(
+          Layer.mergeAll(runtime, CommandReceiptStore.layer, ServerSettings.layerTest({})),
+        ),
+      ),
+      OrchestrationEventStore.layer,
+      ProjectStore.layer,
+    ).pipe(Layer.provideMerge(SqlitePersistence.layerMemory)),
+  );
+  const eventSink = Context.get(services, EventSinkV2);
+  const routes = HttpApiBuilder.layer(OrchestrationTestApi).pipe(
+    Layer.provide(OrchestrationHttp.layer),
+    Layer.provide(
+      Layer.succeed(ServerEnvironment.ServerEnvironmentIdentity, {
+        getEnvironmentId: Effect.succeed(environmentId),
+      }),
+    ),
+    Layer.provide(
+      Layer.succeed(EnvironmentAuthenticatedAuth, (effect) =>
+        Effect.suspend(() =>
+          effect.pipe(
+            Effect.provideService(EnvironmentAuthenticatedPrincipal, {
+              sessionId: AuthSessionId.make("test-session"),
+              subject: "test",
+              method: "bearer-access-token",
+              scopes: new Set<AuthEnvironmentScope>(allowed() ? ["orchestration:read"] : []),
+            }),
+          ),
+        ),
+      ),
+    ),
+    Layer.provide(Layer.succeedContext(services)),
+    Layer.provide(Layer.mock(ProjectEnrichmentService)({})),
+    Layer.provide(HttpPlatform.layer),
+    Layer.provide(Etag.layerWeak),
+    Layer.provide(NodeServices.layer),
+  );
+  const { handler, dispose } = HttpRouter.toWebHandler(routes, { disableLogger: true });
+  yield* Effect.addFinalizer(() => Effect.promise(dispose));
+  const request = (path: string) =>
+    Effect.promise(() =>
+      handler(
+        new Request(`http://localhost${path}`, {
+          headers: { [ORCHESTRATION_PROTOCOL_HEADER]: ORCHESTRATION_PROTOCOL_VERSION_TEXT },
+        }),
+      ),
+    );
+  return { services, eventSink, request };
+});
+
 it.effect("exports full history with size, scope, and missing-thread checks", () =>
   Effect.gen(function* () {
     let allowed = true;
-    const runtime = ProviderReplayHarness.layerWithRegistry(
-      { name: "thread-transcript" },
-      ProviderAdapterRegistry.layerFromAdapters([]),
-      { runEffectWorker: false },
-    );
-    const services = yield* Layer.build(
-      Layer.mergeAll(
-        runtime,
-        ThreadManagementService.layer.pipe(
-          Layer.provide(
-            Layer.mergeAll(runtime, CommandReceiptStore.layer, ServerSettings.layerTest({})),
-          ),
-        ),
-        OrchestrationEventStore.layer,
-        ProjectStore.layer,
-      ).pipe(Layer.provideMerge(SqlitePersistence.layerMemory)),
-    );
-    const eventSink = Context.get(services, EventSinkV2);
+    const { services, eventSink, request } = yield* makeHttpHarness(() => allowed);
     yield* eventSink.write({
       events: [
         {
@@ -128,43 +181,8 @@ it.effect("exports full history with size, scope, and missing-thread checks", ()
         },
       ],
     });
-    const routes = HttpApiBuilder.layer(TranscriptTestApi).pipe(
-      Layer.provide(OrchestrationHttp.layer),
-      Layer.provide(
-        Layer.succeed(ServerEnvironment.ServerEnvironmentIdentity, {
-          getEnvironmentId: Effect.succeed(environmentId),
-        }),
-      ),
-      Layer.provide(
-        Layer.succeed(EnvironmentAuthenticatedAuth, (effect) =>
-          Effect.suspend(() =>
-            effect.pipe(
-              Effect.provideService(EnvironmentAuthenticatedPrincipal, {
-                sessionId: AuthSessionId.make("test-session"),
-                subject: "test",
-                method: "bearer-access-token",
-                scopes: new Set<AuthEnvironmentScope>(allowed ? ["orchestration:read"] : []),
-              }),
-            ),
-          ),
-        ),
-      ),
-      Layer.provide(Layer.succeedContext(services)),
-      Layer.provide(Layer.mock(ProjectEnrichmentService)({})),
-      Layer.provide(HttpPlatform.layer),
-      Layer.provide(Etag.layerWeak),
-      Layer.provide(NodeServices.layer),
-    );
-    const { handler, dispose } = HttpRouter.toWebHandler(routes, { disableLogger: true });
-    yield* Effect.addFinalizer(() => Effect.promise(dispose));
     const read = (threadId: ThreadId) =>
-      Effect.promise(() =>
-        handler(
-          new Request(`http://localhost/api/orchestration/threads/${threadId}/transcript`, {
-            headers: { [ORCHESTRATION_PROTOCOL_HEADER]: ORCHESTRATION_PROTOCOL_VERSION_TEXT },
-          }),
-        ),
-      );
+      request(`/api/orchestration/threads/${threadId}/transcript`);
 
     const emptyResponse = yield* read(thread.id);
     expect(emptyResponse.status).toBe(200);
@@ -240,5 +258,68 @@ it.effect("exports full history with size, scope, and missing-thread checks", ()
     expect((yield* read(ThreadId.make("missing"))).status).toBe(404);
     allowed = false;
     expect((yield* read(thread.id)).status).toBe(403);
+  }),
+);
+
+it.effect("deduplicates equal pull request lists only in opted-in HTTP shell snapshots", () =>
+  Effect.gen(function* () {
+    const { eventSink, request } = yield* makeHttpHarness();
+    const link = (number: number): ThreadPullRequestLink => ({
+      host: "github.com",
+      repository: "pingdotgg/t3code",
+      number,
+      url: `https://github.com/pingdotgg/t3code/pull/${number}`,
+      source: "agent",
+      linkedAt: "2026-09-29T00:00:00.000Z",
+      snapshot: null,
+      stack: null,
+    });
+    const lists = [[link(1), link(2)], [link(1), link(2)], [link(1)]];
+    yield* eventSink.write({
+      events: lists.map((pullRequests, index) => {
+        const id = ThreadId.make(`shell-${index}`);
+        return {
+          id: EventId.make(`create-${id}`),
+          type: "thread.created" as const,
+          threadId: id,
+          occurredAt: now,
+          payload: { ...thread, id, pullRequests },
+        };
+      }),
+    });
+
+    const defaultResponse = yield* request("/api/orchestration/shell");
+    expect(defaultResponse.status).toBe(200);
+    const json = yield* Effect.promise(() => defaultResponse.json());
+    const full = yield* decodeShellSnapshotWire(json);
+    const decoded = yield* decodeShellSnapshot(json);
+    expect(decoded.threads).toHaveLength(3);
+    for (const [index, links] of lists.entries()) {
+      expect(decoded.threads.find((row) => row.id === `shell-${index}`)?.pullRequests).toEqual(
+        links,
+      );
+    }
+    expect(full.threads.every((row) => !("pullRequestReference" in row))).toBe(true);
+
+    const response = yield* request("/api/orchestration/shell?deduplicatePullRequests=true");
+    expect(response.status).toBe(200);
+    const compact = yield* Effect.promise(() => response.json());
+    const duplicateIndices = decoded.threads.flatMap((row, index) =>
+      row.id === "shell-0" || row.id === "shell-1" ? [index] : [],
+    );
+    const [first, duplicate] = duplicateIndices;
+    expect(first).toBeDefined();
+    expect(duplicate).toBeDefined();
+    expect(compact).toEqual({
+      ...full,
+      threads: full.threads.map((row, index) => {
+        if (index !== duplicate) return row;
+        const { pullRequests: _links, ...rest } = row;
+        return { ...rest, pullRequestReference: first };
+      }),
+    });
+    const disabled = yield* request("/api/orchestration/shell?deduplicatePullRequests=false");
+    expect(disabled.status).toBe(200);
+    expect(yield* Effect.promise(() => disabled.json())).toEqual(full);
   }),
 );

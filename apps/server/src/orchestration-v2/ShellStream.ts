@@ -13,6 +13,7 @@ import {
   OrchestrationV2ThreadShell as ThreadShellSchema,
 } from "@t3tools/contracts";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
+import { stableStringify } from "@t3tools/shared/relaySigning";
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
@@ -31,6 +32,24 @@ export function buildActiveShellSnapshot(input: {
     threads: input.threads.threads,
     archivedThreads: [],
   };
+}
+
+export function deduplicateShellPullRequests(
+  snapshot: OrchestrationV2ShellSnapshot,
+): OrchestrationV2ShellSnapshot {
+  const firstRowByLinks = new Map<string, number>();
+  const threads = snapshot.threads.map((thread, index) => {
+    if (thread.pullRequests === undefined || thread.pullRequests.length === 0) return thread;
+    const key = stableStringify(thread.pullRequests);
+    const reference = firstRowByLinks.get(key);
+    if (reference === undefined) {
+      firstRowByLinks.set(key, index);
+      return thread;
+    }
+    const { pullRequests: _links, ...row } = thread;
+    return { ...row, pullRequestReference: reference };
+  });
+  return { ...snapshot, threads };
 }
 
 /**
