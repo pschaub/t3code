@@ -3932,7 +3932,10 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
               update.sessionUpdate === "user_message_chunk"
             ) {
               agentWork = { sessionUpdate: "state_update", state: "running" };
-              if (context !== null) context.workAccepted = true;
+              if (context !== null) {
+                context.workAccepted = true;
+                if (!context.finalized) return;
+              }
             }
             if (
               context !== null &&
