@@ -14,6 +14,9 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Redacted from "effect/Redacted";
 import * as Stream from "effect/Stream";
+import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
+import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as ProcessRunner from "../processRunner.ts";
 
 import type { ProviderInstance } from "@t3tools/provider-core/server/driver";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
@@ -245,3 +248,71 @@ it.layer(layerWithAccounts)("RuntimePolicyV2 with GitHub accounts", (it) => {
     }),
   );
 });
+
+it.effect("opens agent sessions with the account selected by gh default or GH_REPO", () =>
+  Effect.gen(function* () {
+    const accounts = new Map([
+      ["work/app", "work"],
+      ["personal/notes", "personal"],
+      ["research/dataset", "research"],
+    ]);
+    const processLayer = Layer.mock(ProcessRunner.ProcessRunner)({
+      run: ({ args }) =>
+        Effect.succeed({
+          stdout: args.includes("rev-parse")
+            ? "/project-worktree\n"
+            : args.includes("--get-regexp")
+              ? "remote.origin.gh-resolved base\n"
+              : "origin\thttps://github.com/personal/notes.git (fetch)\nupstream\thttps://github.com/work/app.git (fetch)\n",
+          stderr: "",
+          code: ChildProcessSpawner.ExitCode(0),
+          timedOut: false,
+          stdoutTruncated: false,
+          stderrTruncated: false,
+          stdoutInvalidUtf8: false,
+          stderrInvalidUtf8: false,
+        }),
+    });
+    const dependencies = Layer.mergeAll(
+      Layer.effect(
+        RepositoryIdentityResolver.RepositoryIdentityResolver,
+        RepositoryIdentityResolver.make(),
+      ).pipe(Layer.provide(processLayer)),
+      Layer.mock(GitHubCredentials.GitHubCredentials)({
+        accountFor: (_host, repository) => Effect.succeed(accounts.get(repository ?? "")),
+        get: (host, repository) => {
+          const account = accounts.get(repository ?? "");
+          return account === undefined
+            ? Effect.fail(new GitHubCredentials.GitHubNotSignedInError({ host }))
+            : Effect.succeed({
+                host,
+                account,
+                token: Redacted.make(`${account}-token`),
+                source: "gh" as const,
+                fingerprint: account,
+              });
+        },
+      }),
+    );
+    const environments = [];
+    for (const environment of [{}, { GH_REPO: "research/dataset" }]) {
+      const resolved = yield* Effect.gen(function* () {
+        const policy = yield* RuntimePolicy.RuntimePolicyV2;
+        const now = yield* DateTime.now;
+        return yield* policy.resolve({
+          thread: makeThread({ now, worktreePath: "/project-worktree" }),
+          modelSelection,
+          includeEnvironment: true,
+        });
+      }).pipe(
+        Effect.provide(layerTest.pipe(Layer.provide(dependencies))),
+        Effect.provideService(HostProcess.Environment, environment),
+      );
+      environments.push(ProviderAdapter.runtimePolicyEnvironment(resolved));
+    }
+    assert.deepEqual(environments, [
+      { GH_TOKEN: "personal-token" },
+      { GH_TOKEN: "research-token" },
+    ]);
+  }),
+);
