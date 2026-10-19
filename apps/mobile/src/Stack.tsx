@@ -95,6 +95,7 @@ import { SettingsAppearanceRouteScreen } from "./features/settings/SettingsAppea
 import { SettingsClientStorageRouteScreen } from "./features/settings/SettingsClientStorageRouteScreen";
 import { SettingsDiagnosticsRouteScreen } from "./features/diagnostics/SettingsDiagnosticsRouteScreen";
 import { SettingsProviderAccountsRouteScreen } from "./features/settings/SettingsProviderAccountsRouteScreen";
+import { SettingsGitHubAccountsRouteScreen } from "./features/settings/SettingsGitHubAccountsRouteScreen";
 import { SettingsAuthRouteScreen } from "./features/settings/SettingsAuthRouteScreen";
 import { SettingsEnvironmentDetailRouteScreen } from "./features/settings/SettingsEnvironmentDetailRouteScreen";
 import { SettingsEnvironmentsRouteScreen } from "./features/settings/SettingsEnvironmentsRouteScreen";
@@ -240,6 +241,11 @@ const SettingsContentStack = createV5SheetStackNavigator({
       screen: SettingsEnvironmentSourceControlRouteScreen,
       linking: "source-control",
       options: { title: "Source control" },
+    }),
+    SettingsGitHubAccounts: createNativeStackScreen({
+      screen: SettingsGitHubAccountsRouteScreen,
+      linking: "github-accounts",
+      options: { title: "GitHub accounts" },
     }),
     SettingsEnvironmentAgentBehavior: createNativeStackScreen({
       screen: SettingsEnvironmentAgentBehaviorRouteScreen,
