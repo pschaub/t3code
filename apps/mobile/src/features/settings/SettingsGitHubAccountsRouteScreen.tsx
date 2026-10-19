@@ -31,11 +31,6 @@ import { SettingsScreen } from "./components/SettingsScreen";
 import { SettingsSection } from "./components/SettingsSection";
 import { useSettingsEnvironmentFilter, type SettingsTarget } from "./settings-environment-filter";
 
-/**
- * Which `gh` login reads each GitHub host, and each repository owner on it, for the selected
- * environments. The logins are the server's own, so only a host signed in more than once has a
- * choice to make here.
- */
 export function SettingsGitHubAccountsRouteScreen() {
   const { selectedTargets } = useSettingsEnvironmentFilter();
   const insets = useSafeAreaInsets();
@@ -66,10 +61,6 @@ export function SettingsGitHubAccountsRouteScreen() {
   );
 }
 
-/**
- * One environment's GitHub logins and account choices, and how to change them: the hosts its
- * `gh` holds more than one working login for, and a save that replaces one host's choices.
- */
 function useGitHubAccountChoices(environment: SettingsTarget) {
   const environmentId = environment.environmentId;
   const discovery = useEnvironmentQuery(
@@ -233,15 +224,14 @@ function HostAccounts(props: {
       })}
       {props.owners.length > 0 ? (
         <Text className="px-2 text-sm text-foreground-muted">
-          Each owner's repositories are read as the account chosen for it, and agents in its
-          projects use it too. A project can choose one for its own repository in its settings.
+          Each owner's repositories use its chosen account. A project can override the account for
+          its own repository in Settings.
         </Text>
       ) : null}
     </>
   );
 }
 
-/** The default first, then every login; `null` is the default. */
 function AccountChoices(props: {
   readonly accounts: ReadonlyArray<string>;
   readonly selected: string | null;
@@ -281,11 +271,6 @@ function AccountChoices(props: {
   );
 }
 
-/**
- * The GitHub login one project's repository reads as, for a project selected in Settings: its
- * own rule, else its owner's. Only for a repository on a host the server holds more than one
- * login for; the rule is the repository's, so every checkout of it shares the choice.
- */
 export function ProjectGitHubAccountSection({
   environment,
   projectId,
@@ -305,15 +290,11 @@ export function ProjectGitHubAccountSection({
 
   const choice = hosts[repository.host];
   const owner = repository.repository.split("/")[0]!;
-  const pinned =
-    choice?.account !== undefined && group.selectable.includes(choice.account)
-      ? choice.account
-      : null;
   const ownerAccount = gitHubDefaultAccount(group, choice, owner);
   return (
     <SettingsSection
       title={`${labelled ? `${environment.label} · ` : ""}GitHub account`}
-      footer={`Pull requests in ${repository.repository} are read as this login, and agents in its projects use it. Owner's account follows the ${owner} rule under GitHub accounts.`}
+      footer={`Pull requests in ${repository.repository} use this login. Owner's account follows the ${owner} rule under GitHub accounts.`}
     >
       <AccountChoices
         accounts={group.selectable}

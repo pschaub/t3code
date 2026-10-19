@@ -44,7 +44,6 @@ function RedactedLogin(props: {
   );
 }
 
-/** Picks one of a host's logins, or the default the first option names. */
 function AccountSelect(props: {
   readonly value: string;
   readonly accounts: ReadonlyArray<string>;
@@ -92,7 +91,6 @@ function AccountSelect(props: {
   );
 }
 
-/** "Default (login)": what a choice left on its default reads as. */
 function DefaultLabel(props: {
   readonly prefix: string;
   readonly account: string | null;
@@ -110,7 +108,6 @@ function DefaultLabel(props: {
   );
 }
 
-/** One owner's or repository's rule: its name, the login it reads as, and a stale warning. */
 function AccountRuleRow(props: {
   readonly name: string;
   readonly rule: string | undefined;
@@ -362,11 +359,6 @@ export function GitHubAccountSettings({
   );
 }
 
-/**
- * The GitHub login one project's repository reads as, at a project scope in Settings: its own
- * rule, else its owner's. Only for a repository on a host this environment's `gh` holds more than
- * one login for; the rule is the repository's, so every checkout of it shares the choice.
- */
 export function ProjectGitHubAccountRow({
   environmentId,
   projectId,
@@ -374,7 +366,6 @@ export function ProjectGitHubAccountRow({
 }: {
   readonly environmentId: EnvironmentId;
   readonly projectId: ProjectId;
-  /** Names the environment when the scope spans several. */
   readonly environmentLabel: string | null;
 }) {
   const discovery = useEnvironmentQuery(
@@ -408,10 +399,6 @@ export function ProjectGitHubAccountRow({
 
   const choice = hosts[repository.host];
   const owner = repository.repository.split("/")[0]!;
-  const pinned =
-    choice?.account !== undefined && group.selectable.includes(choice.account)
-      ? choice.account
-      : null;
   const ownerAccount = gitHubDefaultAccount(group, choice, owner);
   const rule = choice?.repositories?.[repository.repository];
   const stale = rule !== undefined && !group.selectable.includes(rule);

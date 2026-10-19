@@ -1,9 +1,3 @@
-/**
- * GitHub account choices as Source Control settings draw and edit them, on web and mobile alike.
- * The logins come from `gh` on the server through discovery; the choices are GitHub's settings.
- *
- * @module client-runtime/githubAccounts
- */
 import {
   pullRequestHostOf,
   type RepositoryIdentity,
@@ -82,10 +76,6 @@ export function nextGitHubHosts(
   };
 }
 
-/**
- * Owner or repository rules after one changes; `null` drops the rule, so the owner falls back to
- * the host's account and the repository to its owner's.
- */
 export function nextGitHubRules(
   current: AccountRules | undefined,
   key: string,
@@ -96,23 +86,21 @@ export function nextGitHubRules(
   return account === null ? rest : { ...rest, [normalized]: account };
 }
 
-/**
- * The GitHub host and lowercased `owner/name` a project's repository is read as, which is what
- * a repository rule is keyed by, or null for a repository that is not on a GitHub host.
- */
 export function gitHubRepositoryOf(
   identity: RepositoryIdentity | null | undefined,
 ): { readonly host: string; readonly repository: string } | null {
   const owner = identity?.owner?.trim().toLowerCase();
   const name = identity?.name?.trim().toLowerCase();
-  if (!identity || !owner || !name) return null;
+  if (
+    !identity ||
+    (identity.provider !== undefined && identity.provider !== GITHUB) ||
+    !owner ||
+    !name
+  )
+    return null;
   return { host: pullRequestHostOf(identity, GITHUB), repository: `${owner}/${name}` };
 }
 
-/**
- * The repository owners on `host` an account can be chosen for: every owner this environment's
- * projects there belong to, and any that already has a rule, sorted.
- */
 export function gitHubOwnersOnHost(
   host: string,
   identities: ReadonlyArray<RepositoryIdentity | null | undefined>,
@@ -120,6 +108,7 @@ export function gitHubOwnersOnHost(
 ): ReadonlyArray<string> {
   const owners = new Set(Object.keys(rules ?? {}));
   for (const identity of identities) {
+    if (identity?.provider !== undefined && identity.provider !== GITHUB) continue;
     const owner = identity?.owner?.trim().toLowerCase();
     if (owner && pullRequestHostOf(identity, GITHUB) === host) owners.add(owner);
   }
