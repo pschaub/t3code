@@ -421,6 +421,7 @@ export interface ProjectionStoreV2Shape {
   ) => Effect.Effect<ReadonlyArray<ProjectionSettlementCandidate>, ProjectionStoreV2Error>;
   readonly getThreadsWithPullRequests: (
     threadId?: ThreadId,
+    options?: { readonly watchedOnly?: boolean },
   ) => Effect.Effect<ReadonlyArray<ProjectionThreadPullRequests>, ProjectionStoreV2Error>;
   readonly getThreadWorktreePaths: () => Effect.Effect<
     ReadonlyArray<{ readonly threadId: ThreadId; readonly worktreePath: string }>,
@@ -1206,6 +1207,20 @@ const decodeRows =
           }),
       ),
     );
+
+// Full thread schemas can exhaust the fiber budget slowly; yield between small
+// batches so background sweeps let other event-loop work run during bulk decoding.
+const decodeBackgroundRows = Effect.fnUntraced(function* <A, B, E, R>(
+  rows: ReadonlyArray<A>,
+  decode: (row: A) => Effect.Effect<B, E, R>,
+) {
+  const values: Array<B> = [];
+  for (let index = 0; index < rows.length; index++) {
+    if (index > 0 && index % 64 === 0) yield* Effect.yieldNow;
+    values.push(yield* decode(rows[index]!));
+  }
+  return values;
+});
 
 function messageIdForTurnItem(item: OrchestrationV2TurnItem): string | null {
   switch (item.type) {
@@ -5650,71 +5665,83 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               )
             ORDER BY t.updated_at ASC, t.thread_id ASC
           `;
-            if (rows.length === 0) return [];
+            if (rows.length === 0) {
+              return { rows, providerThreadRows: [], pendingTurnItemRows: [] };
+            }
             const threadIds = rows.map((row) => ThreadId.make(row.thread_id));
-            const { providerThreadsByThreadId, pendingTurnItemsByThreadId } =
-              yield* pendingBackgroundDataByThreadId({
-                providerThreadRows: yield* selectShellProviderThreadRows(threadIds),
-                pendingTurnItemRows: yield* selectShellPendingTurnItemRows(threadIds),
-              });
-            return yield* Effect.forEach(rows, (row) =>
-              Effect.gen(function* () {
-                const thread = yield* decodeThreadPayload(row.payload_json);
-                const status = shellStatusFromStoredRunStatus(row.latest_run_status);
-                const latestRunId =
-                  row.latest_run_id === null ? null : RunId.make(row.latest_run_id);
-                return {
-                  ...thread,
-                  pinnedAt: thread.pinnedAt ?? null,
-
-                  autoSettleDisabledAt: thread.autoSettleDisabledAt ?? null,
-                  snoozedUntil: thread.snoozedUntil ?? null,
-                  snoozedAt: thread.snoozedAt ?? null,
-                  status,
-                  latestRunId,
-                  latestRunRequestedAt:
-                    row.latest_run_requested_at === null
-                      ? null
-                      : DateTime.makeUnsafe(row.latest_run_requested_at),
-                  latestRunStartedAt:
-                    row.latest_run_started_at === null
-                      ? null
-                      : DateTime.makeUnsafe(row.latest_run_started_at),
-                  latestRunCompletedAt:
-                    row.latest_run_completed_at === null
-                      ? null
-                      : DateTime.makeUnsafe(row.latest_run_completed_at),
-                  latestUserMessageAt:
-                    row.latest_user_message_at === null
-                      ? null
-                      : DateTime.makeUnsafe(row.latest_user_message_at),
-                  latestUserAuthoredMessageAt:
-                    row.latest_user_authored_message_at === null
-                      ? null
-                      : DateTime.makeUnsafe(row.latest_user_authored_message_at),
-                  activityRunStatus: null,
-                  activityRunStartedAt: null,
-                  pendingRuntimeRequest: null,
-                  pendingBackgroundTasks: derivePendingBackgroundWork({
-                    latestRun:
-                      latestRunId === null || status === "idle"
-                        ? null
-                        : { id: latestRunId, ordinal: 0, status },
-                    providerThreads: providerThreadsByThreadId.get(thread.id) ?? [],
-                    turnItems: pendingTurnItemsByThreadId.get(thread.id) ?? [],
-                    activeProviderThreadId: thread.activeProviderThreadId,
-                    hasActiveRun: false,
-                    pullRequests: thread.pullRequests,
-                  }),
-                } satisfies ProjectionSettlementCandidate;
-              }),
-            );
+            return {
+              rows,
+              providerThreadRows: yield* selectShellProviderThreadRows(threadIds),
+              pendingTurnItemRows: yield* selectShellPendingTurnItemRows(threadIds),
+            };
           }),
         )
-        .pipe(Effect.mapError((cause) => new ProjectionStoreSetupError({ cause })));
+        .pipe(
+          // Release the shared connection before schema decoding and background derivation.
+          Effect.flatMap(({ rows, providerThreadRows, pendingTurnItemRows }) =>
+            Effect.gen(function* () {
+              const { providerThreadsByThreadId, pendingTurnItemsByThreadId } =
+                yield* pendingBackgroundDataByThreadId({ providerThreadRows, pendingTurnItemRows });
+              return yield* decodeBackgroundRows(rows, (row) =>
+                Effect.gen(function* () {
+                  const thread = yield* decodeThreadPayload(row.payload_json);
+                  const status = shellStatusFromStoredRunStatus(row.latest_run_status);
+                  const latestRunId =
+                    row.latest_run_id === null ? null : RunId.make(row.latest_run_id);
+                  return {
+                    ...thread,
+                    pinnedAt: thread.pinnedAt ?? null,
+
+                    autoSettleDisabledAt: thread.autoSettleDisabledAt ?? null,
+                    snoozedUntil: thread.snoozedUntil ?? null,
+                    snoozedAt: thread.snoozedAt ?? null,
+                    status,
+                    latestRunId,
+                    latestRunRequestedAt:
+                      row.latest_run_requested_at === null
+                        ? null
+                        : DateTime.makeUnsafe(row.latest_run_requested_at),
+                    latestRunStartedAt:
+                      row.latest_run_started_at === null
+                        ? null
+                        : DateTime.makeUnsafe(row.latest_run_started_at),
+                    latestRunCompletedAt:
+                      row.latest_run_completed_at === null
+                        ? null
+                        : DateTime.makeUnsafe(row.latest_run_completed_at),
+                    latestUserMessageAt:
+                      row.latest_user_message_at === null
+                        ? null
+                        : DateTime.makeUnsafe(row.latest_user_message_at),
+                    latestUserAuthoredMessageAt:
+                      row.latest_user_authored_message_at === null
+                        ? null
+                        : DateTime.makeUnsafe(row.latest_user_authored_message_at),
+                    activityRunStatus: null,
+                    activityRunStartedAt: null,
+                    pendingRuntimeRequest: null,
+                    pendingBackgroundTasks: derivePendingBackgroundWork({
+                      latestRun:
+                        latestRunId === null || status === "idle"
+                          ? null
+                          : { id: latestRunId, ordinal: 0, status },
+                      providerThreads: providerThreadsByThreadId.get(thread.id) ?? [],
+                      turnItems: pendingTurnItemsByThreadId.get(thread.id) ?? [],
+                      activeProviderThreadId: thread.activeProviderThreadId,
+                      hasActiveRun: false,
+                      pullRequests: thread.pullRequests,
+                    }),
+                  } satisfies ProjectionSettlementCandidate;
+                }),
+              );
+            }),
+          ),
+          Effect.mapError((cause) => new ProjectionStoreSetupError({ cause })),
+        );
 
     const getThreadsWithPullRequests: ProjectionStoreV2Shape["getThreadsWithPullRequests"] = (
       threadId,
+      options,
     ) =>
       Effect.gen(function* () {
         const rows = yield* sql<PayloadRow>`
@@ -5723,9 +5750,17 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           WHERE deleted_at IS NULL${threadId === undefined ? sql`` : sql` AND thread_id = ${threadId}`}
             AND json_extract(payload_json, '$.archivedAt') IS NULL
             AND json_array_length(payload_json, '$.pullRequests') > 0
+            ${
+              options?.watchedOnly
+                ? sql`AND EXISTS (
+                    SELECT 1 FROM json_each(payload_json, '$.pullRequests') AS link
+                    WHERE json_type(link.value, '$.watch') IS NOT NULL
+                  )`
+                : sql``
+            }
           ORDER BY updated_at ASC, thread_id ASC
         `;
-        return yield* Effect.forEach(rows, (row) =>
+        return yield* decodeBackgroundRows(rows, (row) =>
           decodeThreadPayload(row.payload_json).pipe(
             Effect.map((thread): ProjectionThreadPullRequests => ({
               id: thread.id,
@@ -6252,7 +6287,7 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
             ),
           ),
         ),
-      getThreadsWithPullRequests: (threadId) =>
+      getThreadsWithPullRequests: (threadId, options) =>
         Ref.get(replayState).pipe(
           Effect.map((state) =>
             [...state.projections.values()]
@@ -6262,7 +6297,9 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
                   (threadId === undefined || thread.id === threadId) &&
                   thread.deletedAt === null &&
                   thread.archivedAt === null &&
-                  (thread.pullRequests ?? []).length > 0,
+                  (thread.pullRequests ?? []).length > 0 &&
+                  (!options?.watchedOnly ||
+                    thread.pullRequests?.some((link) => link.watch !== undefined)),
               )
               .toSorted(
                 (left, right) =>

@@ -364,11 +364,23 @@ const pullRequestLink = (number: number) => ({
   stack: null,
 });
 
+const pullRequestWatch = {
+  startedAt: DateTime.formatIso(old),
+  headSha: null,
+  failedChecks: [],
+  passed: false,
+  passedChecks: [],
+  remarksThrough: DateTime.formatIso(old),
+  remarkIds: [],
+  conflicting: false,
+  wakes: 0,
+};
+
 it.effect.each([
   ["sql", layerSql],
   ["memory", ProjectionStore.layerMemory],
 ] as const)(
-  "%s: lists only active threads with pull request links, oldest first",
+  "%s: lists active threads with pull request links, optionally watched, oldest first",
   ([, testLayer]) =>
     Effect.gen(function* () {
       const store = yield* ProjectionStore.ProjectionStoreV2;
@@ -376,16 +388,24 @@ it.effect.each([
       yield* createThread("empty-links", { pullRequests: [] });
       yield* createThread("archived-link", {
         archivedAt: old,
-        pullRequests: [pullRequestLink(1)],
+        pullRequests: [{ ...pullRequestLink(1), watch: pullRequestWatch }],
+      });
+      yield* createThread("deleted-link", {
+        deletedAt: old,
+        pullRequests: [{ ...pullRequestLink(5), watch: pullRequestWatch }],
       });
       const settled = yield* createThread("settled-link", {
         settledOverride: "settled",
         settledAt: old,
         updatedAt: DateTime.subtract(now, { days: 12 }),
-        pullRequests: [pullRequestLink(2)],
+        pullRequests: [{ ...pullRequestLink(2), watch: pullRequestWatch }],
       });
       const open = yield* createThread("open-link", {
-        pullRequests: [pullRequestLink(3), pullRequestLink(4)],
+        pullRequests: [pullRequestLink(3), { ...pullRequestLink(4), watch: pullRequestWatch }],
+      });
+      const unwatched = yield* createThread("unwatched-link", {
+        updatedAt: now,
+        pullRequests: [pullRequestLink(6)],
       });
 
       const threads = yield* store.getThreadsWithPullRequests();
@@ -394,13 +414,62 @@ it.effect.each([
         [
           [settled, "settled", 1],
           [open, null, 2],
+          [unwatched, null, 1],
         ],
       );
       assert.deepEqual(
         (yield* store.getThreadsWithPullRequests(open)).map((thread) => thread.id),
         [open],
       );
+      assert.deepEqual(
+        yield* store.getThreadsWithPullRequests(undefined, { watchedOnly: true }),
+        threads.filter((thread) => thread.id !== unwatched),
+      );
+      assert.deepEqual(
+        yield* store.getThreadsWithPullRequests(open, { watchedOnly: true }),
+        threads.filter((thread) => thread.id === open),
+      );
+      assert.deepEqual(
+        yield* store.getThreadsWithPullRequests(unwatched, { watchedOnly: true }),
+        [],
+      );
     }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect(
+  "watch reads exclude unwatched payloads before decoding and follow stored watch changes",
+  () =>
+    Effect.gen(function* () {
+      const store = yield* ProjectionStore.ProjectionStoreV2;
+      const sql = yield* SqlClient.SqlClient;
+      const watched = yield* createThread("watch-decode", {
+        pullRequests: [{ ...pullRequestLink(1), watch: pullRequestWatch }],
+      });
+      const unwatched = yield* createThread("unwatched-decode", {
+        pullRequests: [pullRequestLink(2)],
+      });
+      yield* sql`UPDATE orchestration_v2_projection_threads
+      SET payload_json = json_set(payload_json, '$.title', 42)
+      WHERE thread_id = ${unwatched}`;
+
+      assert.deepEqual(
+        (yield* store.getThreadsWithPullRequests(undefined, { watchedOnly: true })).map(
+          (thread) => thread.id,
+        ),
+        [watched],
+      );
+      yield* sql`UPDATE orchestration_v2_projection_threads
+      SET payload_json = json_remove(payload_json, '$.pullRequests[0].watch')
+      WHERE thread_id = ${watched}`;
+      assert.deepEqual(
+        yield* store.getThreadsWithPullRequests(undefined, { watchedOnly: true }),
+        [],
+      );
+      assert.equal(
+        (yield* store.getThreadsWithPullRequests().pipe(Effect.flip))._tag,
+        "ProjectionStoreSetupError",
+      );
+    }).pipe(Effect.provide(layerSql)),
 );
 
 it.effect.each([
