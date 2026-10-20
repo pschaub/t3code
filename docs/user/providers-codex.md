@@ -60,6 +60,14 @@ The shadow account needs its own `auth.json` file. If Codex uses an OS credentia
 store, configure file storage for this setup. See
 [OpenAI's credential storage guide](https://learn.chatgpt.com/docs/auth#credential-storage).
 
+On Windows without symlink permission, setup shares directories without requiring
+Developer Mode. For accounts created this way, missing `config.toml` and `AGENTS.md`
+files are copied from the shared home without overwriting existing account files.
+Changes stay local to the account; deleting a copied file lets setup import it again.
+Other files at the root of a new shadow home are created separately by Codex.
+Sessions and skills directories stay shared. Existing account files and working
+symlinks are kept.
+
 Use a completely separate **CODEX_HOME path**, with no shadow home, when you want
 separate Codex sessions and configuration. That instance cannot continue threads
 from the other home.

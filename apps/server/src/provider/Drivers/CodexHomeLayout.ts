@@ -7,6 +7,10 @@ import * as PlatformError from "effect/PlatformError";
 
 import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+// @effect-diagnostics-next-line nodeBuiltinImport:off - Effect cannot request Windows directory junctions or exclusive file copies.
+import * as NodeFSP from "node:fs/promises";
+// @effect-diagnostics-next-line nodeBuiltinImport:off - Exclusive snapshots must not overwrite an account's existing configuration.
+import * as NodeFS from "node:fs";
 
 export interface CodexHomeLayout {
   readonly mode: "direct" | "authOverlay";
@@ -31,6 +35,13 @@ const KNOWN_SHARED_DIRECTORIES = [
 const PRIVATE_ENTRY_NAMES = new Set(["auth.json", "models_cache.json"]);
 // Finder maintains metadata separately for each directory, including shadow homes.
 const SHADOW_LOCAL_ENTRY_NAMES = new Set(["log", "memories", "tmp", ".DS_Store"]);
+const LOCAL_FILES_MARKER = ".t3-local-files";
+SHADOW_LOCAL_ENTRY_NAMES.add(LOCAL_FILES_MARKER);
+const SNAPSHOT_ENTRY_NAMES = new Set(["config.toml", "AGENTS.md"]);
+const isWindowsLinkRefusal = Schema.is(
+  Schema.Struct({ code: Schema.Literals(["EPERM", "EACCES"]) }),
+);
+const isCopyRace = Schema.is(Schema.Struct({ code: Schema.Literals(["EEXIST", "ENOENT"]) }));
 // Codex creates these runtime locks itself when it starts in a shadow home before the shared
 // home has one. They guard shared state, so a local copy is replaced with the shared link.
 const REPLACEABLE_SHARED_RUNTIME_ENTRIES = new Set(["mcp-oauth-locks", ".sqlite-maintenance.lock"]);
@@ -75,7 +86,16 @@ export class CodexShadowHomeFileSystemError extends Schema.TaggedError<CodexShad
   "CodexShadowHomeFileSystemError",
   {
     ...CodexShadowHomeContext,
-    operation: Schema.Literals(["readLink", "makeDirectory", "readDirectory", "remove", "symlink"]),
+    operation: Schema.Literals([
+      "readLink",
+      "makeDirectory",
+      "readDirectory",
+      "remove",
+      "symlink",
+      "stat",
+      "copyFile",
+      "writeFile",
+    ]),
     path: Schema.String,
     targetPath: Schema.optional(Schema.String),
     entryName: Schema.optional(Schema.String),
@@ -219,16 +239,117 @@ const ensureSymlink = Effect.fn("CodexHomeLayout.ensureSymlink")(function* (inpu
   readonly sharedHomePath: string;
   readonly effectiveHomePath: string;
   readonly entryName: string;
+  readonly windowsFallback?: { active: boolean };
 }): Effect.fn.Return<void, CodexShadowHomeError, Path.Path> {
   const path = yield* Path.Path;
   const target = path.join(input.sharedHomePath, input.entryName);
   const link = path.join(input.effectiveHomePath, input.entryName);
+  const context = {
+    sharedHomePath: input.sharedHomePath,
+    effectiveHomePath: input.effectiveHomePath,
+    entryName: input.entryName,
+  };
   const state = yield* readLinkState({
     ...input,
     linkPath: link,
   });
 
-  const createLink = input.fileSystem.symlink(target, link).pipe(
+  const junction = Effect.tryPromise({
+    try: () => NodeFSP.symlink(target, link, "junction"),
+    catch: (cause) =>
+      new CodexShadowHomeFileSystemError({
+        ...context,
+        operation: "symlink",
+        path: link,
+        targetPath: target,
+        cause,
+      }),
+  });
+  if (input.windowsFallback?.active) {
+    const info = yield* input.fileSystem.stat(target).pipe(
+      Effect.catchTags({
+        PlatformError: (cause) =>
+          cause.reason._tag === "NotFound"
+            ? Effect.succeed(null)
+            : Effect.fail(
+                new CodexShadowHomeFileSystemError({
+                  ...context,
+                  operation: "stat",
+                  path: target,
+                  cause,
+                }),
+              ),
+      }),
+    );
+    if (info === null) return;
+    if (info.type !== "Directory") {
+      const wrongLink =
+        state._tag === "Symlink" && path.resolve(path.dirname(link), state.target) !== target;
+      if (wrongLink)
+        yield* input.fileSystem.remove(link).pipe(
+          Effect.mapError(
+            (cause) =>
+              new CodexShadowHomeFileSystemError({
+                ...context,
+                operation: "remove",
+                path: link,
+                cause,
+              }),
+          ),
+        );
+      if ((state._tag === "Missing" || wrongLink) && SNAPSHOT_ENTRY_NAMES.has(input.entryName))
+        yield* Effect.tryPromise({
+          try: () => NodeFSP.copyFile(target, link, NodeFS.constants.COPYFILE_EXCL),
+          catch: (cause) =>
+            new CodexShadowHomeFileSystemError({
+              ...context,
+              operation: "copyFile",
+              path: link,
+              targetPath: target,
+              cause,
+            }),
+        }).pipe(
+          Effect.catchTags({
+            CodexShadowHomeFileSystemError: (error) =>
+              isCopyRace(error.cause) ? Effect.void : Effect.fail(error),
+          }),
+        );
+      return;
+    }
+  }
+  const createLink = Effect.gen(function* () {
+    if (input.windowsFallback?.active) return yield* junction;
+    yield* input.fileSystem.symlink(target, link).pipe(
+      Effect.catchTags({
+        PlatformError: (cause) =>
+          Effect.gen(function* () {
+            if (!input.windowsFallback || !isWindowsLinkRefusal(cause.reason.cause))
+              return yield* cause;
+            // Known directories are materialized first, before any account-local runtime file.
+            const directory = (yield* input.fileSystem.stat(target)).type === "Directory";
+            if (directory) yield* junction;
+            const marker = path.join(input.effectiveHomePath, LOCAL_FILES_MARKER);
+            yield* input.fileSystem.writeFileString(marker, "", { flag: "wx", mode: 0o600 }).pipe(
+              Effect.catchTags({
+                PlatformError: (error) =>
+                  error.reason._tag === "AlreadyExists"
+                    ? Effect.void
+                    : Effect.fail(
+                        new CodexShadowHomeFileSystemError({
+                          ...context,
+                          operation: "writeFile",
+                          path: marker,
+                          cause: error,
+                        }),
+                      ),
+              }),
+            );
+            input.windowsFallback.active = true;
+            if (!directory) yield* ensureSymlink(input);
+          }),
+      }),
+    );
+  }).pipe(
     Effect.catchTags({
       PlatformError: (cause) =>
         new CodexShadowHomeFileSystemError({
@@ -378,6 +499,20 @@ export const materializeCodexShadowHome = Effect.fn("materializeCodexShadowHome"
     }
   }
 
+  const windowsFallback =
+    (yield* HostProcess.Platform) === "win32"
+      ? {
+          active:
+            (yield* readLinkState({
+              fileSystem,
+              sharedHomePath: layout.sharedHomePath,
+              effectiveHomePath,
+              entryName: LOCAL_FILES_MARKER,
+              linkPath: path.join(effectiveHomePath, LOCAL_FILES_MARKER),
+            }))._tag !== "Missing",
+        }
+      : undefined;
+
   yield* Effect.forEach(
     PRIVATE_ENTRY_NAMES,
     (entryName) =>
@@ -403,6 +538,7 @@ export const materializeCodexShadowHome = Effect.fn("materializeCodexShadowHome"
         sharedHomePath: layout.sharedHomePath,
         effectiveHomePath,
         entryName,
+        ...(windowsFallback ? { windowsFallback } : {}),
       });
     },
     { discard: true },
